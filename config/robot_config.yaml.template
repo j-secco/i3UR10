@@ -1,0 +1,160 @@
+# UR10 WebSocket Jog Control Interface Configuration
+# Author: jsecco ®
+
+robot:
+  # UR10 Robot IP Address - CHANGE THIS TO YOUR ROBOT'S IP
+  ip_address: "192.168.10.24"
+  
+  # WebSocket Ports (Standard UR ports)
+  ports:
+    primary: 30001      # Primary interface for command execution
+    realtime: 30003     # Real-time data stream
+    dashboard: 29999    # Dashboard commands (power, state, etc.)
+  
+  # Robot identification  
+  model: "UR10"
+  serial_number: ""     # Auto-detected during connection
+
+# Jogging Configuration
+jogging:
+  # Default jogging speeds (m/s for Cartesian, rad/s for joints)
+  default_speed: 0.1
+  
+  # Step size for step-mode jogging
+  step_size: 0.01
+  
+  # Maximum allowed speed for safety
+  max_speed: 0.5
+  
+  # Acceleration limits (m/s² for Cartesian, rad/s² for joints)
+  default_acceleration: 0.1
+  max_acceleration: 1.0
+  
+  # Jogging modes
+  modes:
+    - "cartesian"     # X, Y, Z, Rx, Ry, Rz
+    - "joint"         # J1, J2, J3, J4, J5, J6
+  
+  # Coordinate frames for Cartesian jogging
+  coordinate_frames:
+    - "base"          # Robot base frame
+    - "tool"          # Tool center point frame
+
+# Speed Profiles for different operation modes
+speed_profiles:
+  precise:
+    cartesian: 0.05   # m/s
+    joint: 0.1        # rad/s
+    acceleration: 0.05
+    
+  normal:
+    cartesian: 0.1    # m/s  
+    joint: 0.2        # rad/s
+    acceleration: 0.1
+    
+  fast:
+    cartesian: 0.25   # m/s
+    joint: 0.5        # rad/s
+    acceleration: 0.3
+
+# Safety Configuration
+safety:
+  # Enable real-time safety monitoring
+  enable_emergency_monitoring: true
+  
+  # Connection timeout (seconds)
+  connection_timeout: 5.0
+  
+  # Watchdog timeout for continuous jogging
+  watchdog_timeout: 1.0
+  
+  # Maximum time for single jog command (seconds)
+  max_jog_time: 10.0
+  
+  # Safety speed limits (cannot exceed these)
+  safety_limits:
+    max_cartesian_speed: 1.0    # m/s
+    max_joint_speed: 3.14       # rad/s (180 deg/s)
+    max_acceleration: 2.0       # m/s² or rad/s²
+
+# Network Configuration
+network:
+  # Connection retry attempts
+  connection_retries: 3
+  
+  # Delay between retry attempts (seconds)
+  retry_delay: 2.0
+  
+  # Keepalive interval for connections (seconds)
+  keepalive_interval: 30.0
+  
+  # Receive timeout for WebSocket data (seconds)
+  receive_timeout: 1.0
+  
+  # Buffer sizes for WebSocket communication
+  buffer_size: 4096
+
+# User Interface Configuration  
+ui:
+  # Window properties
+  window:
+    title: "UR10 Jog Control Interface"
+    width: 1024
+    height: 768
+    fullscreen: true
+    
+  # Touch interface settings
+  touch:
+    button_size: 120           # Minimum button size (pixels)
+    touch_margin: 15          # Margin around touch elements
+    hold_time: 150            # Hold time for continuous jog (ms)
+    
+  # Visual feedback
+  feedback:
+    position_update_rate: 10  # Hz
+    status_update_rate: 5     # Hz
+    
+  # Color scheme
+  colors:
+    primary: "#2196F3"        # Blue
+    secondary: "#FFC107"      # Amber  
+    success: "#4CAF50"        # Green
+    warning: "#FF9800"        # Orange
+    danger: "#F44336"         # Red
+    background: "#FAFAFA"     # Light gray
+
+# Logging Configuration
+logging:
+  # Log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+  
+  # Log file locations (relative to project root)
+  files:
+    main: "logs/ur10_jog_control.log"
+    communication: "logs/websocket_communication.log"
+    safety: "logs/safety_events.log"
+    
+  # Log rotation
+  rotation:
+    max_size: "10MB"          # Maximum file size before rotation
+    backup_count: 5           # Number of backup files to keep
+    
+  # Log formatting
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+
+# Development and Debug Settings
+debug:
+  # Enable debug mode (more verbose logging, test features)
+  enabled: false
+  
+  # Simulate robot connection for testing without hardware
+  simulate_robot: false
+  
+  # Enable WebSocket message logging
+  log_websocket_messages: false
+  
+  # Test mode settings
+  test_mode:
+    fake_position_data: false
+    mock_safety_states: false

@@ -1,0 +1,20 @@
+--- a/src/ui/main_window.py
++++ b/src/ui/main_window.py
+@@ -746,6 +746,7 @@ class MainWindow(QMainWindow):
+             except Exception as e:
+                 self.logger.error(f"Error updating status: {e}")
+                 
+     def _on_position_update(self, tcp_pose, joint_angles):
+         """Handle position update from controller."""
++        self.logger.info(f"Position callback received: TCP={tcp_pose[:3]}, Joint={joint_angles[:3]}")
+         position_data = {'tcp_pose': tcp_pose, 'joint_angles': joint_angles}
+         self.position_updated.emit(position_data)
+         
+@@ -762,6 +763,7 @@ class MainWindow(QMainWindow):
+         
+     def _on_position_display_update(self, status_data):
+         """Update position display with new data."""
++        self.logger.info(f"Position display update called with data: {list(status_data.keys())}")
+         try:
+             # Update TCP position
+             tcp_pose = status_data.get('tcp_pose', [0.0] * 6)

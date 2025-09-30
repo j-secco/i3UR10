@@ -1,0 +1,12 @@
+# This patch fixes the position update system to show real robot positions
+# and last known position when disconnected
+
+# 1. Replace demo position data with real robot position queries
+# 2. Always start status loop to show last known position when disconnected
+# 3. Store last known good position data
+
+--- a/src/control/jog_controller.py
++++ b/src/control/jog_controller.py
+# The status loop should:
+# - When connected: Query real robot position and update displays
+# - When disconnected: Continue showing last known position (no updates)
