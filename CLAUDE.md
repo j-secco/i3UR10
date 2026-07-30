@@ -55,6 +55,7 @@ nc -zv 192.168.10.24 29999      # Dashboard
 - **JogController**: orchestrator; owns the controller, receiver, and dashboard client and exposes them to the UI
 - **CartesianJog** / **JointJog**: continuous (speedl/speedj) and step (movel/movej) jogging
 - **SafetyMonitor**: safety state tracking and emergency handling
+- **pose_guard**: FK + calibrated capsule self-collision model; validates every demo program path (including interpolated poses between waypoints) against the CURRENT saved home before it is sent to the robot. The gate lives in WebSocketController's program-send methods; unsafe programs are refused with a logged reason instead of causing a protective stop.
 - **DemoRunner** plus demo modules: `wave`, `bow`, `pendulum`, `juggle`, `plunge`, `reach`, `sorting`, `sprint`, `stacking`, `technical`, `industrial`
 
 ### UI layer (`src/ui/`)
@@ -65,7 +66,7 @@ nc -zv 192.168.10.24 29999      # Dashboard
 
 ## Demo Authoring
 
-Read `SMOOTH_MOTION.md` before writing or modifying demos. Key rule: demos run as ONE infinite-loop URScript program (`jsecco_demo_loop`) so the controller never hits a program boundary between moves; per-move sends cause full deceleration and brake clicks. The doc covers the motion API, UI feedback wiring, and a new-demo checklist. Use `reach_map.py` to validate choreography amplitudes against self-collision before running on hardware.
+Read `SMOOTH_MOTION.md` before writing or modifying demos. Key rule: demos run as ONE infinite-loop URScript program (`jsecco_demo_loop`) so the controller never hits a program boundary between moves; per-move sends cause full deceleration and brake clicks. The doc covers the motion API, UI feedback wiring, and a new-demo checklist. Use `reach_map.py` to validate choreography amplitudes against self-collision before running on hardware; it reads the current saved home from config. Demos apply joint deltas relative to the user-savable home pose, so a re-saved home changes every choreography's absolute geometry: the pose_guard gate refuses unsafe programs at the motion layer, and adaptive demos (PlungeDemo `_safe_depth_scale`) shrink their amplitude to fit the current home.
 
 ## Configuration
 

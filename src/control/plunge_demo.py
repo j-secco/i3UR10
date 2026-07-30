@@ -24,7 +24,13 @@ MAX_JOINT_SPEED_RAD_S   =  1.0
 MAX_JOINT_ACCEL_RAD_S2  =  1.5
 MAX_DELTA_FROM_HOME_RAD = 0.9
 
-# Saved home: [-0.8442, -1.1413, 2.2144, -3.7987, -1.4705, 0.2638]
+# Depth is adapted to the CURRENT saved home at start (pose_guard): the deltas
+# below assume an elbow around 127 deg at home, and a home re-saved with a more
+# folded elbow would otherwise drive plunge_deep into self-collision (this
+# caused the 2026-07-30 protective stop at a 166 deg fold). Below this scale
+# the choreography is too shallow to read as a plunge, so refuse instead.
+MIN_DEPTH_SCALE = 0.35
+
 # Choreography uses J2 (shoulder) + J3 (elbow) for vertical-feeling TCP motion.
 # J2 -= N  →  shoulder lifts (arm up)
 # J2 += N  →  shoulder drops (arm down)
@@ -133,16 +139,21 @@ class PlungeDemo:
     # Choreography
     # ------------------------------------------------------------------
 
-    def _build_segments(self) -> List[Segment]:
+    def _build_segments(self, depth_scale: float = 1.0) -> List[Segment]:
         """
         All per-segment v/a values are BASE values at speed_scale=1.0.
         They are multiplied by speed_scale inside _build_waypoints().
+
+        depth_scale scales only the DOWNWARD (plunge) deltas; the high pose
+        unfolds the arm away from self-collision and stays at full height so
+        the speed contrast keeps reading even at reduced depth.
 
         Plunge character parameters (at speed_scale=1.0):
           Descent: v=0.10, a=0.30  (or 0.08/0.25 for the dramatic third)
           Snap-up: v=0.95, a=1.40
           Contrast: 5.5x (snap vs first plunge)
         """
+        s = depth_scale
         home_pose = self._pose()  # home + audience offset, no extra delta
 
         # Pose definitions
@@ -150,10 +161,10 @@ class PlungeDemo:
         high_pose = self._pose(dj2=-0.50, dj3=-0.25)
 
         # Full-depth plunge: J2 += 0.45 (shoulder drops), J3 += 0.55 (elbow folds)
-        plunge_deep = self._pose(dj2=+0.45, dj3=+0.55)
+        plunge_deep = self._pose(dj2=+0.45 * s, dj3=+0.55 * s)
 
         # Partial plunge (60% amplitude): 0.27 / 0.33
-        plunge_mid  = self._pose(dj2=+0.27, dj3=+0.33)
+        plunge_mid  = self._pose(dj2=+0.27 * s, dj3=+0.33 * s)
 
         segments: List[Segment] = [
             # ---- 1. Address: face audience, medium speed ----
@@ -256,6 +267,20 @@ class PlungeDemo:
         while time.time() < end and not self._stop_requested:
             time.sleep(0.05)
 
+    def _safe_depth_scale(self) -> float:
+        """Largest plunge depth scale that keeps the whole looped path
+        self-collision free from the CURRENT home (pose_guard capsule model).
+        Returns 1.0 if the guard is unavailable; the controller-level gate in
+        move_joint_program_loop still refuses genuinely unsafe programs."""
+        try:
+            from control.pose_guard import max_safe_scale
+        except Exception as exc:
+            self._log.warning("pose_guard unavailable (%s); using full depth", exc)
+            return 1.0
+        return max_safe_scale(
+            lambda s: [seg.joints for seg in self._build_segments(s)]
+        )
+
     # ------------------------------------------------------------------
     # Worker thread
     # ------------------------------------------------------------------
@@ -273,7 +298,19 @@ class PlungeDemo:
 
             self._notify("Starting Plunge")
 
-            segments  = self._build_segments()
+            depth_scale = self._safe_depth_scale()
+            if depth_scale < MIN_DEPTH_SCALE:
+                final_msg = "Unsafe from current Home; re-save Home with a straighter elbow"
+                self._log.error(
+                    "PlungeDemo refused: max safe depth scale %.2f < %.2f for current home %s",
+                    depth_scale, MIN_DEPTH_SCALE, self._home)
+                return
+            if depth_scale < 0.995:
+                self._log.info("PlungeDemo depth limited to %.0f%% for current home",
+                               depth_scale * 100)
+                self._notify(f"Depth limited to {depth_scale * 100:.0f}% (safe for Home)")
+
+            segments  = self._build_segments(depth_scale)
             waypoints = self._build_waypoints(segments)
             N         = len(segments)
 

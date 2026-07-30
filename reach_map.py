@@ -17,137 +17,40 @@ import math
 import os
 import sys
 
-import numpy as np
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_ROOT, "src"))
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+# Single source of truth for FK + capsule model (shared with the runtime
+# guard in WebSocketController.move_joint_program_loop).
+from control.pose_guard import collision_report, fold_angles, is_safe, tcp_xyz
 
-# --- UR10 (CB-series) standard Denavit-Hartenberg parameters (meters / rad) ---
-_A     = [0.0,      -0.612,   -0.5723,  0.0,       0.0,       0.0]
-_D     = [0.1273,    0.0,      0.0,     0.163941,  0.1157,    0.0922]
-_ALPHA = [math.pi/2, 0.0,      0.0,     math.pi/2, -math.pi/2, 0.0]
-
-HOME = [-0.8527525107013147, -1.6017263571368616, 2.5422890186309814,
-        -3.8001683394061487, -1.5843680540667933, 0.2585873603820801]
-
-# --- capsule link radii (m). Calibrated below; conservative UR10 estimates. ---
-R_BASE_SHOULDER = 0.090
-R_UPPER_ARM     = 0.075
-R_FOREARM       = 0.060
-R_WRIST         = 0.050
-SAFETY_MARGIN   = 0.030   # extra clearance required beyond capsule surfaces
+_FALLBACK_HOME = [-0.8527525107013147, -1.6017263571368616, 2.5422890186309814,
+                  -3.8001683394061487, -1.5843680540667933, 0.2585873603820801]
 
 
-# ----------------------------- kinematics -----------------------------------
-
-def _dh(a, d, alpha, theta):
-    ct, st = math.cos(theta), math.sin(theta)
-    ca, sa = math.cos(alpha), math.sin(alpha)
-    return np.array([
-        [ct, -st*ca,  st*sa, a*ct],
-        [st,  ct*ca, -ct*sa, a*st],
-        [0.0,  sa,     ca,    d  ],
-        [0.0,  0.0,    0.0,   1.0],
-    ])
-
-
-def joint_origins(joints):
-    """XYZ of each frame origin P0..P6 in the base frame."""
-    T = np.eye(4)
-    pts = [T[0:3, 3].copy()]
-    for i in range(6):
-        T = T @ _dh(_A[i], _D[i], _ALPHA[i], joints[i])
-        pts.append(T[0:3, 3].copy())
-    return pts
+def _load_home():
+    """Current saved home from config/robot_config.yaml. Demos run relative to
+    THIS pose, so sweeps must too; a hardcoded home silently invalidates every
+    result once the operator re-saves Home from the jog page."""
+    try:
+        import yaml
+        with open(os.path.join(_ROOT, "config", "robot_config.yaml")) as fh:
+            cfg = yaml.safe_load(fh)
+        h = cfg["demo"]["saved_home_joints"]
+        if isinstance(h, list) and len(h) == 6:
+            return [float(x) for x in h]
+    except Exception as exc:
+        print(f"WARNING: could not load saved home ({exc}); using fallback")
+    return list(_FALLBACK_HOME)
 
 
-def tcp_xyz(joints):
-    return joint_origins(joints)[-1].tolist()
-
-
-# ------------------------- self-collision model -----------------------------
-
-def _seg_seg_distance(p1, q1, p2, q2):
-    """Minimum distance between segments p1q1 and p2q2 (clamped parametric)."""
-    d1, d2, r = q1 - p1, q2 - p2, p1 - p2
-    a, e, f = d1 @ d1, d2 @ d2, d2 @ r
-    EPS = 1e-9
-    if a <= EPS and e <= EPS:
-        return float(np.linalg.norm(p1 - p2))
-    if a <= EPS:
-        s, t = 0.0, np.clip(f / e, 0.0, 1.0)
-    else:
-        c = d1 @ r
-        if e <= EPS:
-            t, s = 0.0, np.clip(-c / a, 0.0, 1.0)
-        else:
-            b = d1 @ d2
-            denom = a * e - b * b
-            s = np.clip((b * f - c * e) / denom, 0.0, 1.0) if denom > EPS else 0.0
-            t = (b * s + f) / e
-            if t < 0.0:
-                t, s = 0.0, np.clip(-c / a, 0.0, 1.0)
-            elif t > 1.0:
-                t, s = 1.0, np.clip((b - c) / a, 0.0, 1.0)
-    c1, c2 = p1 + d1 * s, p2 + d2 * t
-    return float(np.linalg.norm(c1 - c2))
-
-
-# Non-adjacent capsule pairs to test. Each link is (origin_index_a, origin_index_b, radius).
-_LINKS = {
-    "base_shoulder": (0, 1, R_BASE_SHOULDER),
-    "upper_arm":     (1, 2, R_UPPER_ARM),
-    "forearm":       (2, 3, R_FOREARM),
-    "wrist":         (3, 6, R_WRIST),
-}
-_PAIRS = [("upper_arm", "wrist"), ("base_shoulder", "forearm"), ("base_shoulder", "wrist")]
-
-
-def collision_report(joints):
-    """Return (min_clearance, detail-list). clearance<0 => capsules overlap+margin."""
-    P = joint_origins(joints)
-    worst = math.inf
-    detail = []
-    for na, nb in _PAIRS:
-        ia, ib, ra = _LINKS[na]
-        ja, jb, rb = _LINKS[nb]
-        d = _seg_seg_distance(P[ia], P[ib], P[ja], P[jb])
-        clearance = d - (ra + rb) - SAFETY_MARGIN
-        detail.append((na, nb, d, clearance))
-        worst = min(worst, clearance)
-    return worst, detail
-
-
-def is_safe(joints):
-    return collision_report(joints)[0] >= 0.0
+HOME = _load_home()
 
 
 # ------------------------------ geometry diagnostics -------------------------
 
 def _pose(j2=0.0, j3=0.0, j5=0.0):
     return [HOME[0], HOME[1]+j2, HOME[2]+j3, HOME[3], HOME[4]+j5, HOME[5]]
-
-
-def _angle(v1, v2):
-    """Angle (deg) between two vectors."""
-    n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
-    if n1 < 1e-9 or n2 < 1e-9:
-        return 0.0
-    c = float(np.clip((v1 @ v2) / (n1 * n2), -1.0, 1.0))
-    return math.degrees(math.acos(c))
-
-
-def fold_angles(joints):
-    """Bend angle (deg) at each elbow/wrist joint: 0 = straight, 180 = doubled back.
-    This is what catches over-folded ADJACENT links (the bow's failure mode)."""
-    P = joint_origins(joints)
-    segs = [P[i+1] - P[i] for i in range(6)]          # S0..S5
-    # Meaningful bends: elbow (between upper-arm S2 and forearm S? ) -- use segments
-    # upper_arm=P1->P2 (S1), forearm=P2->P3 (S2), wrist S3,S4,S5.
-    bends = {}
-    for name, a, b in [("elbow", 1, 2), ("wrist1", 2, 3),
-                        ("wrist2", 3, 4), ("wrist3", 4, 5)]:
-        bends[name] = _angle(segs[a], segs[b])
-    return bends
 
 
 # Non-adjacent capsule clearances + adjacent fold angles, for one pose.
@@ -222,9 +125,12 @@ def sweep_demo(mod_path, const_names, cls_name):
     print("  original amplitudes:", {k: round(v, 3) for k, v in base.items()})
 
     # Global scale sweep: scale every amplitude together, find max safe scale.
-    max_safe = 1.0
+    # Starts BELOW 1.0: with a re-saved home the nominal amplitudes themselves
+    # can already collide, and max_safe must not default to a value never
+    # actually validated.
+    max_safe = 0.0
     first_bad = None
-    s = 1.0
+    s = 0.30
     while s <= 2.01:
         for c in const_names:
             setattr(module, c, base[c] * s)
@@ -254,10 +160,25 @@ def sweep_demo(mod_path, const_names, cls_name):
     print()
 
 
+def report_plunge():
+    """PlungeDemo adapts its own depth via pose_guard; report what it picks."""
+    from control.plunge_demo import MIN_DEPTH_SCALE, PlungeDemo
+    demo = PlungeDemo(None, HOME)
+    s = demo._safe_depth_scale()
+    print("=== PlungeDemo ===")
+    verdict = "OK" if s >= MIN_DEPTH_SCALE else f"REFUSES to run (min {MIN_DEPTH_SCALE})"
+    print("  max safe depth scale from current home: %.2fx -> %s\n" % (s, verdict))
+
+
 if __name__ == "__main__":
+    print("home (deg):", [round(math.degrees(q), 1) for q in HOME], "\n")
     run_validation()
     for mod_path, consts, cls_name in _DEMOS:
         try:
             sweep_demo(mod_path, consts, cls_name)
         except Exception as exc:
             print("=== %s: sweep error: %s ===\n" % (cls_name, exc))
+    try:
+        report_plunge()
+    except Exception as exc:
+        print("=== PlungeDemo: report error: %s ===\n" % exc)

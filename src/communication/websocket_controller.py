@@ -55,7 +55,10 @@ class WebSocketController:
         
         # Callbacks for state updates
         self.state_callbacks: List[Callable[[Dict], None]] = []
-        
+
+        # Why the last demo program was refused (None = last program was accepted)
+        self.last_program_error: Optional[str] = None
+
         # Logging
         self.logger = logging.getLogger(self.__class__.__name__)
         
@@ -192,12 +195,39 @@ class WebSocketController:
         command = f"movej({joints_str}, a={acceleration}, v={speed}, r={blend})"
         return self.send_command(command)
     
+    def _guard_program_path(self, waypoints, closed: bool) -> bool:
+        """Refuse to send a demo program whose joint-space path self-collides.
+
+        Validates every waypoint AND the interpolated poses between them
+        against the calibrated capsule model in control.pose_guard. Demos
+        apply fixed deltas relative to the user-savable home pose, so a
+        re-saved home can silently push choreography targets into
+        self-collision (the cause of every protective stop in
+        logs/safety_events.log). Imported lazily to avoid a
+        communication -> control circular import."""
+        try:
+            from control.pose_guard import validate_path
+        except Exception as exc:
+            self.logger.debug("pose_guard unavailable, skipping path validation: %s", exc)
+            return True
+        violation = validate_path(waypoints, closed=closed)
+        if violation is None:
+            self.last_program_error = None
+            return True
+        self.last_program_error = f"self-collision risk: {violation.describe()}"
+        self.logger.error(
+            "REFUSED unsafe program (%s). Re-save Home with a straighter elbow "
+            "or reduce the demo amplitude.", self.last_program_error)
+        return False
+
     def move_joint_program(self, waypoints_with_params) -> bool:
         """Send a list of [j1..j6, v, a, r] waypoints as ONE URScript program.
         Each waypoint carries its own speed/accel/blend so a multi-phase
         choreography runs as one continuous blended motion (no brake locking
         between sub-paths)."""
         if not waypoints_with_params:
+            return False
+        if not self._guard_program_path(waypoints_with_params, closed=False):
             return False
         lines = ["def jsecco_demo_path():"]
         for wp in waypoints_with_params:
@@ -220,6 +250,8 @@ class WebSocketController:
         (URScript sleep() actively holds joints; brakes only engage when a program
         terminates). Use stop_motion() to abort."""
         if not waypoints_with_params:
+            return False
+        if not self._guard_program_path(waypoints_with_params, closed=True):
             return False
         lines = ["def jsecco_demo_loop():"]
         lines.append("  while True:")
@@ -262,6 +294,8 @@ class WebSocketController:
         whole path in a single def...end program lets r= work end-to-end.
         """
         if not path:
+            return False
+        if not self._guard_program_path(path, closed=False):
             return False
         lines = ["def jsecco_demo_path():"]
         last = len(path) - 1
