@@ -77,6 +77,11 @@ class ProfessionalMainWindow(QMainWindow):
     Clean, modern design optimized for industrial touchscreen use.
     """
 
+    # Signals for UI updates
+    position_updated = pyqtSignal(dict)
+    safety_status_changed = pyqtSignal(dict)
+    connection_status_changed = pyqtSignal(bool, str)
+
     def __init__(self, config: Dict[str, Any], parent: Optional[QWidget] = None):
         """Initialize the professional main window."""
         super().__init__(parent)
@@ -118,6 +123,7 @@ class ProfessionalMainWindow(QMainWindow):
         self._setup_ui()
         self._apply_styling()
         self._setup_timers()
+        self._connect_signals()
         self._install_demo_log_handler()
         self.logger.info("Professional main window initialized")
 
@@ -1105,14 +1111,10 @@ class ProfessionalMainWindow(QMainWindow):
         # Wait for stop to complete, then restart with current slider value.
         QTimer.singleShot(900, self._restart_after_speed_change)
 
-    def _restart_after_speed_change(self, attempt: int = 0) -> None:
+    def _restart_after_speed_change(self) -> None:
         runner = self.loop_demo_runner
         if runner is not None and runner.is_running():
-            if attempt >= 20:  # ~6s of 300ms retries -- give up instead of looping forever
-                self.add_log_message(
-                    "Speed change: demo did not stop in time; restart aborted", "WARNING")
-                return
-            QTimer.singleShot(300, lambda: self._restart_after_speed_change(attempt + 1))
+            QTimer.singleShot(300, self._restart_after_speed_change)
             return
         self._loop_demo_start()
 
@@ -1199,19 +1201,18 @@ class ProfessionalMainWindow(QMainWindow):
         self.setStyleSheet(complete_style)
 
     def _setup_timers(self):
-        """Set up update timers and start them at the configured intervals."""
+        """Set up update timers."""
+        # Position update timer
         self.position_timer.timeout.connect(self._update_position_display)
-        self.status_timer.timeout.connect(self._update_status_display)
-        self._apply_timer_intervals()
+        self.position_timer.start(100)  # 10 Hz
 
-    def _apply_timer_intervals(self):
-        """(Re)start the UI timers using the intervals from config (ms).
-        Called at startup and again whenever the Settings dialog changes them."""
-        refresh = self.config.get("ui", {}).get("refresh", {})
-        pos_ms = max(20, int(refresh.get("position_display", 100)))
-        status_ms = max(20, int(refresh.get("status_display", 200)))
-        self.position_timer.start(pos_ms)   # QTimer.start() restarts if already running
-        self.status_timer.start(status_ms)
+        # Status update timer
+        self.status_timer.timeout.connect(self._update_status_display)
+        self.status_timer.start(200)  # 5 Hz
+
+    def _connect_signals(self):
+        """Connect internal signals."""
+        pass
 
     # Event Handlers
     def _set_jog_mode(self, mode: str):
@@ -1222,20 +1223,20 @@ class ProfessionalMainWindow(QMainWindow):
         self.logger.info(f"Jog mode set to: {mode}")
 
     def _on_speed_changed(self, value: int):
-        """Handle jog speed slider changes. The value is applied as the
-        speed_scale on the next _start_jog() call."""
-        self.speed_label.setText(f"Speed: {value}%")
+        """Handle speed slider changes."""
+        speed = value / 100.0  # Convert to 0.0-1.0 range
+        self.speed_label.setText(f"Current Speed: {speed:.2f} m/s")
+        # Note: JogController doesn't have set_jog_speed method
+        # Speed is handled by the speed_scale parameter in start_jog()
 
     def _start_jog(self, axis: str, direction: int):
-        """Start jogging in the specified direction at the slider's speed."""
+        """Start jogging in specified direction."""
         if self.jog_controller:
             # Map axis names to indices
             axis_map = {'x': 0, 'y': 1, 'z': 2, 'rx': 3, 'ry': 4, 'rz': 5,
                        'j1': 0, 'j2': 1, 'j3': 2, 'j4': 3, 'j5': 4, 'j6': 5}
             axis_index = axis_map.get(axis, 0)
-            # Wire the speed slider through as speed_scale (0.01-1.0).
-            speed_scale = max(0.01, min(1.0, self.speed_slider.value() / 100.0))
-            self.jog_controller.start_jog(axis_index, direction, speed_scale)
+            self.jog_controller.start_jog(axis_index, direction)
         self.logger.debug(f"Started jogging {axis} in direction {direction}")
 
     def _stop_jog(self):
@@ -1308,8 +1309,6 @@ class ProfessionalMainWindow(QMainWindow):
                     # Update displayed IP address
                     robot_ip = self.config.get('robot', {}).get('ip_address', 'Unknown')
                     self.ip_value_label.setText(robot_ip)
-                    # Apply any changed UI refresh rates to the running timers.
-                    self._apply_timer_intervals()
                     self.logger.info("Configuration updated")
                     self.add_log_message("Configuration updated", "INFO")
         except ImportError:
@@ -1373,16 +1372,8 @@ class ProfessionalMainWindow(QMainWindow):
                     )
             else:
                 self._protective_stop_logged = False
-                # Auto-hide the overlay once the stop has genuinely cleared.
-                # Require several consecutive False polls so a one-poll flicker
-                # cannot dismiss it; this also covers a stop cleared externally
-                # on the teach pendant (previously the overlay stuck forever).
-                if hasattr(self, "_protective_stop_overlay") and self._protective_stop_overlay.isVisible():
-                    self._protective_stop_clear_count += 1
-                    if self._protective_stop_clear_count >= 5:  # ~1s at 5 Hz
-                        self._protective_stop_overlay.hide()
-                        self._protective_stop_clear_count = 0
-                        self.add_log_message("Protective stop cleared.", "INFO")
+                # Do not auto-hide the overlay when status says False (e.g. polling flicker).
+                # Overlay is hidden only when the user clicks "Unlock protective stop" in _on_protective_stop_unlock_clicked.
 
         except Exception as e:
             self.logger.error(f"Error updating status display: {e}")
@@ -1484,13 +1475,7 @@ class ProfessionalMainWindow(QMainWindow):
             self.ip_value_label.setText(robot_ip)
 
             # Add position callback
-            # The controller fires this from a background thread; marshal it
-            # onto the Qt main thread before touching any widgets/state.
-            controller.add_position_callback(
-                lambda tcp, joints: QTimer.singleShot(
-                    0, lambda t=tcp, j=joints: self._on_position_updated(t, j)
-                )
-            )
+            controller.add_position_callback(self._on_position_updated)
 
             # When position is pulled from robot after connect, refresh UI on main thread
             controller.add_position_fetched_callback(
@@ -1538,6 +1523,10 @@ class ProfessionalMainWindow(QMainWindow):
 
         # Immediately trigger display update
         self._update_position_display()
+
+    def _on_status_updated(self, status_data):
+        """Handle status updates from controller."""
+        pass  # Handled in _update_status_display
 
     def _on_connection_status_changed(self, connected: bool, message: str = ""):
         """Handle connection status changes."""

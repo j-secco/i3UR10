@@ -1,0 +1,93 @@
+demo:
+  base_offset_degrees: 0
+  joint_acceleration: 0.5
+  joint_speed: 0.35
+  saved_home_joints:
+  - -0.8568399588214319
+  - -1.1433404127704065
+  - 2.217410087585449
+  - -3.7997730414019983
+  - -1.4598901907550257
+  - 0.25871920585632324
+  waypoint_delay_s: 2.5
+development:
+  debug_mode: false
+  enable_profiling: false
+  mock_robot_data: false
+  monitor_message_latency: true
+  monitor_ui_performance: true
+  simulation_mode: false
+jogging:
+  coordinate_frames:
+  - base
+  - tool
+  default_acceleration: 0.15000000000000002
+  default_speed: 0.30000000000000016
+  max_speed: 0.6000000000000001
+  modes:
+  - cartesian
+  - joint
+  step_size: 0.01
+logging:
+  backup_count: 5
+  enable_rotation: true
+  file: logs/ur10_jog_websocket.log
+  level: INFO
+  log_connection_events: true
+  log_robot_commands: true
+  log_websocket_messages: false
+  max_file_size: 10485760
+  rotation_interval: daily
+robot:
+  ip_address: 192.168.10.24
+  model: UR10
+  ports:
+    dashboard: 29999
+    primary: 30001
+    realtime: 30001
+    rtde: 30004
+  use_rtde_for_motion: true
+safety:
+  connection_timeout: 5.0
+  enable_emergency_monitoring: true
+  safety_limits:
+    max_acceleration: 2.0
+    max_cartesian_speed: 1.0
+    max_joint_speed: 3.1
+ui:
+  buttons:
+    font_size: 16
+    icon_size: 40
+    minimum_height: 48
+  colors:
+    background: '#FAFAFA'
+    danger: '#F44336'
+    primary: '#2196F3'
+    secondary: '#FFC107'
+    success: '#4CAF50'
+    warning: '#FF9800'
+  feedback:
+    position_update_rate: 13
+    status_update_rate: 5
+  refresh:
+    connection_check: 1000
+    position_display: 100
+    status_display: 200
+    ui_responsiveness: 50
+  theme: professional
+  touch:
+    button_size: 100
+    hold_time: 150
+    touch_margin: 11
+  window:
+    fullscreen: false
+    height: 768
+    title: UR10 Jog Control Interface
+    width: 1024
+websocket:
+  angle_precision: 4
+  buffer_size: 4096
+  enable_compression: false
+  position_precision: 6
+  state_data_frequency: 10.0
+  use_binary_mode: false

@@ -1,0 +1,473 @@
+"""
+Pendulum showcase demo for UR10 (bare flange).
+
+Hypnotic J2 swing (with subtle J3 follow) like a slow metronome, repeating in
+continuous brake-free motion.  The "pendulum feel" comes from the speed
+envelope: each swing segment accelerates toward its midpoint and decelerates at
+the extreme, just like a real pendulum.
+
+Architecture follows wave_demo.py exactly:
+  - ONE URScript program per start (single def jsecco_demo_loop while-True block)
+  - Continuous flow, no zero-velocity moments (every waypoint r > 0)
+  - Per-waypoint [j1..j6, v, a, r] 9-element vectors
+  - Status callback chain via _notify()
+  - _completed flag set in finally before final _notify("Stopped")
+
+Author: jsecco (R)
+"""
+
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, List, Optional
+
+# ----------------------------- Defaults / safety -----------------------------
+
+DEFAULT_JOINT_SPEED       = 0.28   # rad/s — slower than wave; pendulum is deliberate
+DEFAULT_JOINT_ACCELERATION = 0.45  # rad/s^2
+DEFAULT_BLEND_RADIUS      = 0.10   # rad
+DEFAULT_SEND_INTERVAL_S   = 0.08   # s (fallback only)
+DEFAULT_CYCLE_DELAY_S     = 0.0    # seamless loop
+
+# Hard safety caps
+MAX_JOINT_SPEED_RAD_S    =  1.0
+MAX_JOINT_ACCEL_RAD_S2   =  1.5
+MAX_DELTA_FROM_HOME_RAD  = 0.9
+
+# Choreography amplitudes (radians)
+SWING_AMPLITUDE_RAD  = 0.58   # J2 full swing half-width (right extreme J2 = RISE+SWING = 0.80, < 0.9 clamp)
+RISE_LIFT_RAD        = 0.22   # J2 pre-swing setup lift
+J3_FOLLOW_RAD        = 0.26   # J3 subtle follow on each swing
+
+
+@dataclass
+class Segment:
+    """One choreography segment."""
+    name: str
+    waypoints: List[List[float]]
+    speed: float    # rad/s (capped + scaled)
+    accel: float    # rad/s^2 (capped)
+    blend: float    # intra-segment blend radius
+
+
+class PendulumDemo:
+    """
+    Pendulum: a gentle, hypnotic J2 swing with subtle J3 follow, like a slow
+    metronome.  Runs in a background thread; use start() / stop() / is_running().
+
+    Constructor absorbs all kwargs that _loop_demo_start passes; unknown ones
+    are silently discarded via **_unused.
+    """
+
+    def __init__(
+        self,
+        motion_controller: Any,
+        home_joints: List[float],
+        audience_offset_rad: float = 0.0,
+        speed_scale: float = 0.5,
+        send_interval_s: float = DEFAULT_SEND_INTERVAL_S,
+        cycle_delay_s: float = DEFAULT_CYCLE_DELAY_S,
+        joint_speed: float = DEFAULT_JOINT_SPEED,
+        joint_acceleration: float = DEFAULT_JOINT_ACCELERATION,
+        blend_radius: float = DEFAULT_BLEND_RADIUS,
+        status_callback: Optional[Callable[[str], None]] = None,
+        **_unused: Any,
+    ):
+        self.motion_controller    = motion_controller
+        self.home_joints          = list(home_joints)
+        self.audience_offset_rad  = audience_offset_rad
+        self.speed_scale          = max(0.01, min(1.0, speed_scale))
+        self.send_interval_s      = max(0.02, send_interval_s)
+        self.cycle_delay_s        = max(0.0, cycle_delay_s)
+        self.joint_speed          = joint_speed
+        self.joint_acceleration   = joint_acceleration
+        self.blend_radius         = blend_radius
+        self.status_callback      = status_callback
+        self.logger               = logging.getLogger(self.__class__.__name__)
+
+        self._stop_requested = False
+        self._thread: Optional[threading.Thread] = None
+        self._completed = True
+
+    # ------------------------------- helpers --------------------------------
+
+    def _notify(self, message: str) -> None:
+        self.logger.info("notify -> %s", message)
+        if self.status_callback:
+            try:
+                self.status_callback(message)
+            except Exception as e:
+                self.logger.warning("Status callback error: %s", e)
+
+    def _connected(self) -> bool:
+        ctrl = self.motion_controller
+        if hasattr(ctrl, "is_connected"):
+            try:
+                return bool(ctrl.is_connected())
+            except Exception:
+                return False
+        if hasattr(ctrl, "connected"):
+            return bool(getattr(ctrl, "connected", False))
+        return True
+
+    def _clamp_waypoint(self, wp: List[float]) -> List[float]:
+        out: List[float] = []
+        for q, h in zip(wp, self.home_joints):
+            lo = h - MAX_DELTA_FROM_HOME_RAD
+            hi = h + MAX_DELTA_FROM_HOME_RAD
+            out.append(max(lo, min(hi, q)))
+        return out
+
+    def _scaled_speed(self, base: float) -> float:
+        return min(MAX_JOINT_SPEED_RAD_S, max(0.01, base * self.speed_scale))
+
+    @staticmethod
+    def _capped_accel(base: float) -> float:
+        return min(MAX_JOINT_ACCEL_RAD_S2, max(0.05, base))
+
+    def _pose(self, **deltas) -> List[float]:
+        """Build a 6-joint waypoint: home + audience offset on J1 + per-joint deltas."""
+        j1, j2, j3, j4, j5, j6 = self.home_joints
+        wp = [
+            j1 + self.audience_offset_rad + deltas.get("j1", 0.0),
+            j2 + deltas.get("j2", 0.0),
+            j3 + deltas.get("j3", 0.0),
+            j4 + deltas.get("j4", 0.0),
+            j5 + deltas.get("j5", 0.0),
+            j6 + deltas.get("j6", 0.0),
+        ]
+        return self._clamp_waypoint(wp)
+
+    # --------------------------- segment definitions ------------------------
+
+    def _build_segments(self) -> List[Segment]:
+        """
+        Nine-segment pendulum cycle.
+
+        Pendulum feel: swing segments use moderate blend (0.10–0.15) in the
+        body of the swing and a slightly tighter blend (0.05) at the extreme
+        waypoints to give the visual impression of a momentary reversal pause
+        without ever reaching zero velocity.  The last waypoint of the whole
+        cycle uses r=0.05 to blend seamlessly into the next iteration.
+
+        Segments:
+          1. Settle   — face audience at home height (slow orient)
+          2. Rise     — J2 lifts slightly to set up the swing pose
+          3. SwingR1  — J2 right extreme, J3 follow right
+          4. SwingL1  — through centre to left extreme, J3 follow left
+          5. SwingR2  — repeat right
+          6. SwingL2  — repeat left
+          7. SwingR3  — smaller amplitude, natural wind-down
+          8. Settle   — return to rise pose
+          9. Lower    — descend back to home (last wp blends into next cycle)
+        """
+        b_speed = self.joint_speed
+        b_accel = self.joint_acceleration
+
+        home      = self._pose()
+        turned    = self._pose()              # audience offset already in _pose()
+        rise_pose = self._pose(j2=-RISE_LIFT_RAD)
+
+        # Right extreme (J2 -= SWING_AMPLITUDE, J3 follows slightly)
+        right_extreme = self._pose(
+            j2=-(RISE_LIFT_RAD + SWING_AMPLITUDE_RAD),
+            j3=-J3_FOLLOW_RAD,
+        )
+        # Left extreme (J2 += SWING_AMPLITUDE from rise, J3 follows other way)
+        left_extreme = self._pose(
+            j2=-(RISE_LIFT_RAD - SWING_AMPLITUDE_RAD),
+            j3=+J3_FOLLOW_RAD,
+        )
+        # Wind-down: smaller amplitude
+        right_small = self._pose(
+            j2=-(RISE_LIFT_RAD + SWING_AMPLITUDE_RAD * 0.55),
+            j3=-J3_FOLLOW_RAD * 0.55,
+        )
+
+        # Swing speed — slightly brisk for pendulum inertia feel
+        sw_speed = self._scaled_speed(b_speed * 1.15)
+        sw_accel = self._capped_accel(b_accel * 1.10)
+
+        segments: List[Segment] = [
+            # 1. Settle: orient to audience (= home + offset), slow
+            Segment(
+                name="Settle",
+                waypoints=[turned],
+                speed=self._scaled_speed(b_speed * 0.80),
+                accel=self._capped_accel(b_accel * 0.70),
+                blend=0.08,
+            ),
+            # 2. Rise: lift J2 to set up the swing pose, medium
+            Segment(
+                name="Rise",
+                waypoints=[
+                    self._pose(j2=-RISE_LIFT_RAD * 0.55),   # mid-lift (blend flows)
+                    rise_pose,
+                ],
+                speed=self._scaled_speed(b_speed * 0.90),
+                accel=self._capped_accel(b_accel * 0.90),
+                blend=0.08,
+            ),
+            # 3. SwingR1: sweep right — accel through mid, decel at extreme
+            Segment(
+                name="SwingR1",
+                waypoints=[
+                    self._pose(j2=-(RISE_LIFT_RAD + SWING_AMPLITUDE_RAD * 0.50),
+                               j3=-J3_FOLLOW_RAD * 0.50),   # mid-arc (fast blend)
+                    right_extreme,                            # extreme (tighter blend)
+                ],
+                speed=sw_speed,
+                accel=sw_accel,
+                blend=0.10,
+            ),
+            # 4. SwingL1: through centre back to left extreme
+            Segment(
+                name="SwingL1",
+                waypoints=[
+                    rise_pose,                                # pass through centre
+                    self._pose(j2=-(RISE_LIFT_RAD - SWING_AMPLITUDE_RAD * 0.50),
+                               j3=+J3_FOLLOW_RAD * 0.50),   # mid-arc
+                    left_extreme,
+                ],
+                speed=sw_speed,
+                accel=sw_accel,
+                blend=0.10,
+            ),
+            # 5. SwingR2: repeat right
+            Segment(
+                name="SwingR2",
+                waypoints=[
+                    rise_pose,
+                    self._pose(j2=-(RISE_LIFT_RAD + SWING_AMPLITUDE_RAD * 0.50),
+                               j3=-J3_FOLLOW_RAD * 0.50),
+                    right_extreme,
+                ],
+                speed=sw_speed,
+                accel=sw_accel,
+                blend=0.10,
+            ),
+            # 6. SwingL2: repeat left
+            Segment(
+                name="SwingL2",
+                waypoints=[
+                    rise_pose,
+                    self._pose(j2=-(RISE_LIFT_RAD - SWING_AMPLITUDE_RAD * 0.50),
+                               j3=+J3_FOLLOW_RAD * 0.50),
+                    left_extreme,
+                ],
+                speed=sw_speed,
+                accel=sw_accel,
+                blend=0.10,
+            ),
+            # 7. SwingR3: wind-down — smaller amplitude, same speed (inertia)
+            Segment(
+                name="SwingR3",
+                waypoints=[
+                    rise_pose,
+                    self._pose(j2=-(RISE_LIFT_RAD + SWING_AMPLITUDE_RAD * 0.28),
+                               j3=-J3_FOLLOW_RAD * 0.28),
+                    right_small,
+                ],
+                speed=sw_speed,
+                accel=sw_accel,
+                blend=0.08,
+            ),
+            # 8. SettleRise: return to rise pose after wind-down
+            Segment(
+                name="SettleRise",
+                waypoints=[rise_pose],
+                speed=self._scaled_speed(b_speed * 0.75),
+                accel=self._capped_accel(b_accel * 0.70),
+                blend=0.08,
+            ),
+            # 9. Lower: descend to home — last waypoint r=0.05 blends into next cycle
+            Segment(
+                name="Lower",
+                waypoints=[
+                    self._pose(j2=-RISE_LIFT_RAD * 0.55),   # mid-descent
+                    home,                                     # home (r=0.05 applied below)
+                ],
+                speed=self._scaled_speed(b_speed * 0.80),
+                accel=self._capped_accel(b_accel * 0.70),
+                blend=0.08,
+            ),
+        ]
+        return segments
+
+    # -------------------------------- runner --------------------------------
+
+    def _run_loop(self) -> None:
+        final_msg = "Stopped"
+        try:
+            if len(self.home_joints) != 6:
+                final_msg = "Invalid home"
+                return
+            if not self._connected():
+                final_msg = "Disconnected"
+                self.logger.warning("Pendulum demo not started: controller not connected")
+                return
+
+            self._notify("Starting")
+            self.logger.info(
+                "Pendulum showcase started: speed_scale=%.2f audience_offset=%.3f rad",
+                self.speed_scale, self.audience_offset_rad,
+            )
+
+            ctrl       = self.motion_controller
+            has_loop   = hasattr(ctrl, "move_joint_program_loop")
+            has_program = hasattr(ctrl, "move_joint_program")
+            has_stop   = hasattr(ctrl, "stop_motion")
+
+            segments     = self._build_segments()
+            seg_durations = []
+            for seg in segments:
+                raw = self._estimate_duration(seg.waypoints, seg.speed)
+                if seg.blend > 0 and len(seg.waypoints) >= 2:
+                    raw *= 0.35
+                seg_durations.append(max(0.35, raw + 0.1))
+
+            # Build flat per-waypoint param list: [j1..j6, v, a, r]
+            # Every waypoint r > 0 — no zero-velocity/brake moments.
+            big_path: List[List[float]] = []
+            last_seg_idx = len(segments) - 1
+            for i, seg in enumerate(segments):
+                last_wp_idx = len(seg.waypoints) - 1
+                for j, wp in enumerate(seg.waypoints):
+                    if j == last_wp_idx and i == last_seg_idx:
+                        # Cycle-end: small blend so it flows into next iteration
+                        r = 0.05
+                    elif j == last_wp_idx:
+                        # Segment-end extreme: tighter blend for visual reversal feel
+                        r = max(0.05, seg.blend * 0.55)
+                    else:
+                        # Mid-arc: full blend for smooth flow
+                        r = seg.blend
+                    big_path.append([*wp, seg.speed, seg.accel, r])
+
+            if has_loop:
+                ok = ctrl.move_joint_program_loop(big_path, self.cycle_delay_s)
+                if not ok:
+                    final_msg = "Command failed"
+                    return
+                # Notify clock — mirrors segment timing while robot runs the loop
+                while not self._stop_requested:
+                    for i, seg in enumerate(segments):
+                        if self._stop_requested:
+                            break
+                        self._notify(f"({i+1}/{len(segments)}) {seg.name}")
+                        self._sleep_interruptible(seg_durations[i])
+                    if self._stop_requested:
+                        break
+                    if self.cycle_delay_s > 0:
+                        self._sleep_interruptible(self.cycle_delay_s)
+                if has_stop:
+                    try:
+                        ctrl.stop_motion(2.0)
+                        time.sleep(0.6)
+                    except Exception as e:
+                        self.logger.debug("stop_motion failed: %s", e)
+
+            elif has_program:
+                while not self._stop_requested:
+                    ok = ctrl.move_joint_program(big_path)
+                    if not ok:
+                        final_msg = "Command failed"
+                        return
+                    for i, seg in enumerate(segments):
+                        if self._stop_requested:
+                            break
+                        self._notify(f"({i+1}/{len(segments)}) {seg.name}")
+                        self._sleep_interruptible(seg_durations[i])
+                    if self._stop_requested:
+                        break
+                    if self.cycle_delay_s > 0:
+                        self._sleep_interruptible(self.cycle_delay_s)
+                if has_stop:
+                    try:
+                        ctrl.stop_motion(2.0)
+                        time.sleep(0.6)
+                    except Exception as e:
+                        self.logger.debug("stop_motion failed: %s", e)
+
+            else:
+                # Oldest fallback: per-segment send
+                while not self._stop_requested:
+                    for i, seg in enumerate(segments):
+                        if self._stop_requested:
+                            break
+                        self._notify(f"({i+1}/{len(segments)}) {seg.name}")
+                        if not self._send_path(seg.waypoints, seg.speed, seg.accel, seg.blend):
+                            final_msg = "Command failed"
+                            return
+                        self._sleep_interruptible(seg_durations[i])
+                    if self._stop_requested:
+                        break
+                    if self.cycle_delay_s > 0:
+                        self._sleep_interruptible(self.cycle_delay_s)
+
+            # Return to home on stop
+            try:
+                self.motion_controller.move_joint(
+                    self.home_joints,
+                    self._scaled_speed(self.joint_speed * 0.7),
+                    self._capped_accel(self.joint_acceleration * 0.7),
+                    0.0,
+                )
+            except Exception as e:
+                self.logger.debug("Return-to-home on stop failed: %s", e)
+
+        finally:
+            self._completed = True
+            self._notify(final_msg)
+            self.logger.info("Pendulum showcase stopped")
+
+    # ------------------------------- utilities ------------------------------
+
+    def _send_path(self, path, speed, accel, blend) -> bool:
+        ctrl = self.motion_controller
+        if hasattr(ctrl, "move_joint_path"):
+            return ctrl.move_joint_path(path, speed, accel, blend)
+        last = len(path) - 1
+        for i, wp in enumerate(path):
+            r = blend if i < last else 0.0
+            if not ctrl.move_joint(wp, speed, accel, r):
+                return False
+            time.sleep(self.send_interval_s)
+        return True
+
+    @staticmethod
+    def _estimate_duration(path, speed) -> float:
+        if len(path) < 2 or speed <= 0:
+            return 0.0
+        total = 0.0
+        for a, b in zip(path[:-1], path[1:]):
+            total += max(abs(x - y) for x, y in zip(a, b)) / speed
+        return total
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        end = time.time() + max(0.0, seconds)
+        while time.time() < end and not self._stop_requested:
+            time.sleep(0.05)
+
+    # -------------------------------- public API ----------------------------
+
+    def start(self) -> bool:
+        if self._thread is not None and self._thread.is_alive():
+            return False
+        if len(self.home_joints) != 6:
+            self.logger.error("home_joints must have 6 elements")
+            return False
+        self._stop_requested = False
+        self._completed      = False
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop_requested = True
+
+    def is_running(self) -> bool:
+        if getattr(self, "_completed", True):
+            return False
+        return self._thread is not None and self._thread.is_alive()

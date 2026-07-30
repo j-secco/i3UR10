@@ -8,8 +8,9 @@ Author: jsecco ®
 """
 
 from .jog_controller import JogController
-from .cartesian_jog import CartesianJog  
+from .cartesian_jog import CartesianJog
 from .joint_jog import JointJog
 from .safety_monitor import SafetyMonitor
+from .demo_runner import DemoRunner
 
-__all__ = ['JogController', 'CartesianJogController', 'JointJogController', 'SafetyMonitor']
+__all__ = ['JogController', 'CartesianJog', 'JointJog', 'SafetyMonitor', 'DemoRunner']

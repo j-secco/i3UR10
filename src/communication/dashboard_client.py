@@ -375,7 +375,7 @@ class DashboardClient:
     def get_safety_mode(self) -> Optional[str]:
         """
         Get current safety mode.
-        
+
         Returns:
             Safety mode string or None if failed
         """
@@ -383,6 +383,32 @@ class DashboardClient:
         if response:
             self.robot_status['safety_mode'] = response
         return response
+
+    def get_error(self) -> Optional[str]:
+        """
+        Get last robot error message (if supported by controller).
+        Returns empty string when no error, or the error text. Not all UR firmware versions support this.
+
+        Returns:
+            Error string or None if command failed/unsupported
+        """
+        response = self._send_command("get error")
+        if response is None:
+            return None
+        return response.strip() if response else ""
+
+    def get_warning(self) -> Optional[str]:
+        """
+        Get last robot warning message (if supported by controller).
+        Returns empty string when no warning. Not all UR firmware versions support this.
+
+        Returns:
+            Warning string or None if command failed/unsupported
+        """
+        response = self._send_command("get warning")
+        if response is None:
+            return None
+        return response.strip() if response else ""
     
     def get_polyscope_version(self) -> Optional[str]:
         """

@@ -5,6 +5,12 @@ This module handles the real-time data reception from the Universal Robot UR10
 using the real-time interface (port 30003). Provides high-frequency robot state
 monitoring for position feedback and safety status.
 
+Packet format (UR Primary/Secondary Client Interface, see ClientInterfaces_Primary.pdf):
+- Message: 4 bytes length (big-endian uint32) + payload. Payload: 1 byte message_type (16 = Robot State).
+- Robot State subpackages: each 4 bytes length + 1 byte type + payload. Type 1 = JointData
+  (6 x 41 bytes per joint; first 8 bytes of each joint = q_actual in rad). Type 4 = CartesianInfo
+  (12 doubles; first 6 = X,Y,Z,Rx,Ry,Rz in m and rad).
+
 Based on Universal Robots Socket Communication documentation.
 Author: jsecco ®
 """
@@ -22,6 +28,13 @@ try:
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
+
+try:
+    # Optional: records protective/emergency stops with context. The receiver
+    # must keep working even if this module is missing, so the import is guarded.
+    from .safety_event_logger import SafetyEventLogger
+except Exception:
+    SafetyEventLogger = None
 
 class WebSocketReceiver:
     """
@@ -86,10 +99,23 @@ class WebSocketReceiver:
         self.messages_received = 0
         self.last_message_time = 0.0
         self.message_frequency = 0.0
+
+        # True after at least one parsed update where joint_angles were not all zero
+        self._position_received = False
         
         # Logging
         self.logger = logging.getLogger(self.__class__.__name__)
-        
+
+        # Safety event logger: records protective/emergency stops with the
+        # joint config, TCP and controller messages. Optional and isolated --
+        # its absence or failure must never affect robot communication.
+        self.safety_logger = None
+        if SafetyEventLogger is not None:
+            try:
+                self.safety_logger = SafetyEventLogger()
+            except Exception as exc:
+                self.logger.debug("SafetyEventLogger init failed: %s", exc)
+
         # Test conversion with known values on startup (only in debug mode)
         root_logger = logging.getLogger()
         if root_logger.level <= logging.DEBUG:
@@ -126,7 +152,8 @@ class WebSocketReceiver:
         """Disconnect from robot and cleanup resources."""
         self.should_stop.set()
         self.connected = False
-        
+        self._position_received = False
+
         if self.receive_thread and self.receive_thread.is_alive():
             self.receive_thread.join(timeout=2.0)
             
@@ -194,7 +221,26 @@ class WebSocketReceiver:
             Joint angles [j1, j2, j3, j4, j5, j6] in radians
         """
         return self.robot_state['joint_angles'].copy()
-    
+
+    def has_valid_position(self) -> bool:
+        """
+        Return True if we have received at least one position update where
+        joint angles were not all zero (i.e. real data from the robot).
+        """
+        return getattr(self, '_position_received', False)
+
+    def set_joint_angles(self, joints: List[float], notify: bool = True) -> None:
+        """
+        Set joint angles from an external source (e.g. primary interface request).
+        Use when realtime stream is not providing data so the app has current position.
+        If notify is False, callbacks are not invoked (use when updating from background thread).
+        """
+        if joints and len(joints) == 6 and all(-7.0 < q < 7.0 for q in joints):
+            self.robot_state['joint_angles'] = list(joints)
+            self._position_received = True
+            if notify:
+                self._notify_callbacks()
+
     def get_tcp_speed(self) -> List[float]:
         """
         Get current TCP velocity.
@@ -342,40 +388,67 @@ class WebSocketReceiver:
     def _process_realtime_data(self, data: bytes):
         """
         Process incoming real-time robot data.
-        
-        Args:
-            data: Raw binary robot data
+        Data is the payload after the 4-byte message length (i.e. first byte is message type).
+
+        Packet structure (UR Primary/Secondary Client Interface):
+        - Byte 0: message_type (16 = Robot State on some interfaces; 30003 may differ)
+        - From byte 1: subpackages, each: 4 bytes length, 1 byte type, (length-5) bytes payload
         """
         try:
-            # This is a simplified parser for the UR real-time interface
-            # The actual format is quite complex and depends on the UR version
-            # For a complete implementation, refer to the UR documentation
-            
-            offset = 0
-            
-            # Update timestamp
             self.robot_state['timestamp'] = time.time()
-            
-            # Parse message type (first byte)
-            if len(data) < 1:
+
+            if len(data) < 6:
                 return
-            
-            message_type = data[offset]
-            offset += 1
-            
-            # Parse UR robot message format
-            # The UR robot sends different message types with state data
-            
-            if len(data) >= 1060:  # Minimum size for UR state message
-                self._parse_robot_state_message(data, offset)
-            elif len(data) >= 100:  # Smaller safety/status messages
-                self._parse_safety_message(data, offset)
-            
-            # Notify callbacks
+
+            message_type = data[0]
+            if message_type == 20:
+                # Robot Message packet: controller text (protective-stop
+                # reasons, popups, key/error messages). No robot state here --
+                # route to the safety logger and stop.
+                self._handle_robot_message(data)
+                return
+            if message_type != 16:
+                self.logger.debug("Robot state message type %s (expected 16), trying to parse anyway", message_type)
+
+            # Parse subpackages starting at byte 1 (try even if message type != 16 for port 30003 variants)
+            self._parse_robot_state_subpackages(data, 1)
             self._notify_callbacks()
-            
+            self._update_safety_logger()
+
         except Exception as e:
             self.logger.debug(f"Error processing real-time data: {e}")
+
+    def _handle_robot_message(self, data: bytes) -> None:
+        """Extract human-readable text from a UR Robot Message (type 20) packet
+        and buffer it in the safety logger. Heuristic and fully defensive: we
+        scan for printable-ASCII runs rather than decoding every message
+        subtype, so it cannot crash on an unexpected layout."""
+        if not self.safety_logger:
+            return
+        try:
+            import re
+            for match in re.findall(rb'[\x20-\x7e]{4,}', data[1:]):
+                text = match.decode('ascii', errors='ignore').strip()
+                if len(text) >= 4:
+                    self.safety_logger.note_robot_message(text)
+        except Exception as e:
+            self.logger.debug("robot message parse failed: %s", e)
+
+    def _update_safety_logger(self) -> None:
+        """Feed current safety state to the safety logger. It writes a log
+        block only on a transition into a protective/emergency stop."""
+        if not self.safety_logger:
+            return
+        try:
+            self.safety_logger.on_state(
+                protective=self.robot_state.get('protective_stopped', False),
+                emergency=self.robot_state.get('emergency_stopped', False),
+                robot_mode=self.robot_state.get('robot_mode'),
+                joints=self.robot_state.get('joint_angles'),
+                tcp=self.robot_state.get('tcp_pose'),
+            )
+        except Exception as e:
+            self.logger.debug("safety logger update failed: %s", e)
     
     def _convert_axis_angle_to_rpy(self, axis_angle_pose: List[float]) -> List[float]:
         """
@@ -487,132 +560,86 @@ class WebSocketReceiver:
         except Exception as e:
             self.logger.error(f"Error in conversion test: {e}")
 
-    def _parse_robot_state_message(self, data: bytes, offset: int):
+    def _parse_robot_state_subpackages(self, data: bytes, start: int):
         """
-        Parse robot state message from UR binary data format.
-        
-        Args:
-            data: Binary message data from UR robot
-            offset: Current parsing offset
+        Parse Robot State message subpackages (UR Primary/Secondary spec).
+        Subpackage: 4 bytes length (big-endian uint32), 1 byte type, then payload.
+        - Type 1 or 2 (JointData): 6 joints, 41 bytes each. First 8 bytes per joint = q_actual (rad).
+        - Type 4, 5 or 6 (CartesianInfo): 12 doubles or first 6 = TCP. Position can be in m or mm.
+        If no known subpackage is found, fallback: scan for 6 consecutive doubles in joint range.
         """
         try:
-            # UR robot sends data in specific binary format
-            # Real-time interface provides robot state at ~500Hz
-            
-            if len(data) < offset + 300:  # Minimum data size
-                self.logger.debug("Insufficient data for UR state message")
-                return
-            
-            # Look for orientation values that match teach pendant: 1.707, 3.654, -0.579
-            # Try scanning through the entire data buffer for these specific values
-            tcp_pose = None
-            joint_angles = None
-            found_rpy_match = False
-            
-            # Scan for RPY values that match teach pendant (within tolerance)
-            target_rpy = [1.707, 3.654, -0.579]
-            tolerance = 0.01
-            
-            for scan_offset in range(0, len(data) - 48, 8):  # Scan every 8 bytes (double alignment)
-                try:
-                    # Try to read 6 doubles at this offset
-                    test_data = list(struct.unpack('>6d', data[scan_offset:scan_offset + 48]))
-                    
-                    # Check if any 3 consecutive values match our target RPY
-                    for i in range(3):  # Check positions 0-2, 1-3, 2-4, 3-5
-                        candidate_rpy = test_data[i:i+3]
-                        if (len(candidate_rpy) == 3 and
-                            abs(candidate_rpy[0] - target_rpy[0]) < tolerance and
-                            abs(candidate_rpy[1] - target_rpy[1]) < tolerance and
-                            abs(candidate_rpy[2] - target_rpy[2]) < tolerance):
-                            
-                            # Found a match! Extract position and orientation
-                            if i == 3:  # Orientation is at positions 3-5, so position is at 0-2
-                                tcp_pose = test_data  # Position + orientation
-                                self.logger.info(f"🎯 FOUND RPY MATCH at offset {scan_offset}, positions {i}-{i+2}")
-                                self.logger.info(f"   Full data: {test_data}")
-                                self.logger.info(f"   Position: [{test_data[0]:.6f}, {test_data[1]:.6f}, {test_data[2]:.6f}]")
-                                self.logger.info(f"   Orientation: [{test_data[3]:.6f}, {test_data[4]:.6f}, {test_data[5]:.6f}]")
-                                found_rpy_match = True
-                                break
-                            elif i == 0:  # Might be orientation first, then position
-                                # Look for position data nearby
-                                tcp_pose = [0.0, 0.0, 0.0] + candidate_rpy  # Placeholder position + RPY
-                                self.logger.info(f"🎯 FOUND RPY MATCH at offset {scan_offset}, positions {i}-{i+2} (orientation first)")
-                                self.logger.info(f"   Orientation: [{candidate_rpy[0]:.6f}, {candidate_rpy[1]:.6f}, {candidate_rpy[2]:.6f}]")
-                                found_rpy_match = True
-                                break
-                                
-                    if found_rpy_match:
-                        break
-                        
-                except struct.error:
-                    continue
-            
-            # If no RPY match found, use the real robot data offsets from position_reader analysis
-            if not found_rpy_match:
-                # Based on position_reader.py, the real data is at these offsets:
-                # TCP Position: offset 8 (Candidate #1)
-                # Joint Angles: offsets 248, 560, 584 (Candidates #24, #57, #60)
-                
-                # Parse TCP at offset 8 where position_reader found real position data
-                tcp_offset = offset + 8
-                if len(data) >= tcp_offset + 48:
+            pos = start
+            joint_updated = False
+            tcp_updated = False
+            while pos + 5 <= len(data):
+                sub_len = struct.unpack('>I', data[pos:pos + 4])[0]
+                sub_type = data[pos + 4]
+                if sub_len < 5 or pos + sub_len > len(data):
+                    break
+                payload_start = pos + 5
+                payload = data[payload_start:pos + sub_len]
+
+                # Robot Mode Data (type 0): the real safety flags + robot mode.
+                # Payload layout: uint64 timestamp, then bools isRealRobotConnected/
+                # Enabled/PowerOn/EmergencyStopped/ProtectiveStopped/ProgramRunning/
+                # ProgramPaused, then uint8 robotMode.
+                if sub_type == 0 and len(payload) >= 16:
+                    self.robot_state['emergency_stopped'] = payload[11] != 0
+                    self.robot_state['protective_stopped'] = payload[12] != 0
+                    self.robot_state['program_running'] = payload[13] != 0
+                    self.robot_state['robot_mode'] = payload[15]
+
+                # Joint data: types 1 (Primary/Secondary) or 2 (some RT interfaces)
+                if sub_type in (1, 2) and len(payload) >= 246:
+                    joint_angles = []
+                    for i in range(6):
+                        j_start = i * 41
+                        if j_start + 8 <= len(payload):
+                            q_actual = struct.unpack('>d', payload[j_start:j_start + 8])[0]
+                            joint_angles.append(q_actual)
+                    if len(joint_angles) == 6 and all(-7.0 < q < 7.0 for q in joint_angles):
+                        self.robot_state['joint_angles'] = joint_angles
+                        joint_updated = True
+                        if any(abs(q) >= 0.01 for q in joint_angles):
+                            self._position_received = True
+
+                # Cartesian / TCP: types 4, 5 or 6; first 6 doubles = X,Y,Z,Rx,Ry,Rz
+                elif sub_type in (4, 5, 6) and len(payload) >= 48:
+                    tcp_pose = list(struct.unpack('>6d', payload[0:48]))
+                    # Position may be in meters or mm (robot screen often shows mm, e.g. -622, 470, 52)
+                    px, py, pz = tcp_pose[0], tcp_pose[1], tcp_pose[2]
+                    max_pos = max(abs(px), abs(py), abs(pz))
+                    if max_pos >= 0.02 and max_pos <= 5000.0:
+                        if max_pos > 5.0:
+                            # Values in hundreds/thousands -> mm
+                            tcp_pose[0] = px / 1000.0
+                            tcp_pose[1] = py / 1000.0
+                            tcp_pose[2] = pz / 1000.0
+                    if all(-5.0 < tcp_pose[i] < 5.0 for i in range(3)):
+                        self.robot_state['tcp_pose'] = tcp_pose
+                        tcp_updated = True
+
+                pos += sub_len
+
+            # Fallback: if no joint subpackage found, scan for 6 consecutive doubles in joint range (rad)
+            if not joint_updated and len(data) >= start + 48:
+                for scan in range(start, min(len(data) - 48, start + 2000), 8):
                     try:
-                        test_pose = list(struct.unpack('>6d', data[tcp_offset:tcp_offset + 48]))
-                        # Position: X= -0.133m  Y= -0.834m  Z= +0.791m (from position reader)
-                        # Orient:   Rx= -2.499   Ry= -1.654   Rz= -0.809
-                        if all(-3.0 < x < 3.0 for x in test_pose[:3]):  # Robot workspace check
-                            tcp_pose = test_pose  # Use raw data - it's already correct
-                            self.logger.debug(f"Found TCP data at offset 8 (from position_reader analysis)")
+                        six = list(struct.unpack('>6d', data[scan:scan + 48]))
+                        if all(-4.0 < q < 4.0 for q in six) and not any(abs(q) > 1e6 for q in six):
+                            self.robot_state['joint_angles'] = six
+                            if any(abs(q) >= 0.01 for q in six):
+                                self._position_received = True
+                            break
                     except struct.error:
-                        pass
-                
-                # Try joint angles at the offsets where position_reader found good data
-                joint_candidate_offsets = [248, 560, 584, 416, 440]  # From position_reader analysis
-                for joint_offset in joint_candidate_offsets:
-                    joint_abs_offset = offset + joint_offset
-                    if len(data) >= joint_abs_offset + 48:
-                        try:
-                            test_joints = list(struct.unpack('>6d', data[joint_abs_offset:joint_abs_offset + 48]))
-                            # Check for reasonable joint angles
-                            if all(-7.0 < x < 7.0 for x in test_joints):
-                                # Avoid scientific notation garbage
-                                if not any(abs(x) > 1e6 for x in test_joints):
-                                    joint_angles = test_joints
-                                    self.logger.debug(f"Found joint data at offset {joint_offset} (from position_reader)")
-                                    break
-                        except struct.error:
-                            continue
-            
-            # Update robot state if we found valid data
-            if tcp_pose is not None:
-                self.robot_state['tcp_pose'] = tcp_pose
-                
-            if joint_angles is not None:
-                self.robot_state['joint_angles'] = joint_angles
-                
-            # Update timestamp
+                        continue
+
             self.robot_state['timestamp'] = time.time()
-            
-            # Log successful parsing (only occasionally to avoid spam)
-            if tcp_pose or joint_angles:
-                if not hasattr(self, '_last_parse_log') or time.time() - self._last_parse_log > 10.0:
-                    tcp_str = f"TCP: {tcp_pose[:3] if tcp_pose else 'None'}"
-                    joint_str = f"Joints: {joint_angles[:3] if joint_angles else 'None'}"
-                    # Also log the raw orientation data for debugging
-                    if tcp_pose and len(tcp_pose) >= 6:
-                        orient_str = f"Orient: [{tcp_pose[3]:.6f}, {tcp_pose[4]:.6f}, {tcp_pose[5]:.6f}]"
-                        match_type = "RPY MATCH" if found_rpy_match else "Parsed"
-                        self.logger.info(f"Real robot data ({match_type}) - {tcp_str}, {orient_str}, {joint_str}")
-                    else:
-                        self.logger.info(f"Real robot data - {tcp_str}, {joint_str}")
-                    self._last_parse_log = time.time()
-                
         except struct.error as e:
-            self.logger.debug(f"Error unpacking UR data: {e}")
+            self.logger.debug(f"Error unpacking UR subpackages: {e}")
         except Exception as e:
-            self.logger.debug(f"Error parsing robot state message: {e}")
+            self.logger.debug(f"Error parsing robot state subpackages: {e}")
 
     def _parse_safety_message(self, data: bytes, offset: int):
         """

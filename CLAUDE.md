@@ -61,14 +61,16 @@ telnet <robot_ip> 29999  # Dashboard
 ## Architecture Overview
 
 ### Three-Tier WebSocket Communication Layer
-- **Primary Interface (Port 30001)**: URScript command execution and bidirectional communication
-- **Real-time Data (Port 30003)**: High-frequency robot state monitoring for position feedback
-- **Dashboard Client (Port 29999)**: Power control, safety management, and robot status queries
+- **Primary Interface (Port 30001)**: URScript command execution and bidirectional communication (used when RTDE motion is disabled)
+- **RTDE (Port 30004, optional)**: When `robot.use_rtde_for_motion` is true, motion commands use ur_rtde (moveJ, moveL, speedJ, speedL, stopScript); enables reliable e-stop and recovery
+- **Real-time Data (Port 30003)**: High-frequency robot state monitoring for position feedback (TCP and joints on screen)
+- **Dashboard Client (Port 29999)**: Power control, safety management, unlock protective stop, and robot status queries
 
 ### Core Module Structure
 
 #### Communication Layer (`src/communication/`)
-- **WebSocketController**: Primary command interface for URScript execution
+- **WebSocketController**: Primary command interface for URScript execution (used when RTDE motion is disabled)
+- **RTDEController**: Optional motion backend using ur_rtde (port 30004); same API as WebSocketController for move/speed/stop
 - **WebSocketReceiver**: Real-time data receiver for continuous robot state monitoring
 - **DashboardClient**: Robot power and safety control interface
 
@@ -118,7 +120,11 @@ Update `config/robot_config.yaml` with your UR10's network settings:
 ```yaml
 robot:
   ip_address: "192.168.10.24"  # Replace with actual robot IP
+  use_rtde_for_motion: true    # Use RTDE (port 30004) for motion; false = Primary (30001)
+  ports:
+    rtde: 30004                # RTDE port when use_rtde_for_motion is true
 ```
+When `use_rtde_for_motion` is true, install `ur_rtde` (pip install ur_rtde). On Linux, system librtde may be required (e.g. PPA sdurobotics/ur-rtde).
 
 ### Touch Interface Optimization
 The UI is specifically optimized for Elo i3 touchscreens:
@@ -147,3 +153,11 @@ development:
 - Emergency stop functionality requires immediate socket communication to dashboard interface
 - UI responsiveness is maintained through Qt signal/slot threading architecture
 - Touch input is optimized with debouncing and visual feedback for industrial use
+
+### Package layout and __init__.py
+Python treats a directory as a **package** (so you can `from control.jog_controller import JogController`) only if it contains an `__init__.py` file. The project uses:
+- `src/communication/__init__.py`: exports WebSocketController, WebSocketReceiver, DashboardClient; jog_controller uses `from ..communication import ...`.
+- `src/control/__init__.py`: exports JogController, CartesianJog, JointJog, SafetyMonitor, and the demo runner.
+- `src/ui/__init__.py`, `src/ui/widgets/__init__.py`, `src/ui/styles/__init__.py`: mark UI subpackages so `from ui.main_window_professional import ...` and theme imports work.
+
+`main.py` adds `src` to `sys.path` and runs from the project root, so imports are `control.*`, `ui.*`. Do not remove these `__init__.py` files or package imports will break. The `examples/rtde-2.7.12/rtde/__init__.py` belongs to the bundled RTDE example library and is separate from the application packages.

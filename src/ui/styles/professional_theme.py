@@ -7,6 +7,15 @@ designed to match high-end industrial control interfaces.
 Author: jsecco ®
 """
 
+from pathlib import Path
+
+# Paths to spinbox +/- icons (project root: src/ui/styles -> 4 levels up to repo root)
+_ASSETS_ICONS = Path(__file__).resolve().parent.parent.parent.parent / "assets" / "icons"
+# file:// not required; absolute path works in Qt QSS
+_SPINBOX_PLUS_ICON = (_ASSETS_ICONS / "spinbox-plus.svg").as_posix()
+_SPINBOX_MINUS_ICON = (_ASSETS_ICONS / "spinbox-minus.svg").as_posix()
+
+
 class ProfessionalColors:
     """Professional color palette for industrial control interfaces."""
 
@@ -81,19 +90,17 @@ def create_professional_stylesheet():
         color: {ProfessionalColors.TEXT_WHITE};
         font-weight: 600;
         font-size: 14px;
-        min-height: 44px;
+        min-height: 36px;
         padding: 12px 24px;
         margin: 4px;
     }}
 
     QPushButton:hover {{
         background-color: {ProfessionalColors.PRIMARY_BLUE_DARK};
-        transform: translateY(-1px);
     }}
 
     QPushButton:pressed {{
         background-color: {ProfessionalColors.PRIMARY_BLUE_DARK};
-        transform: translateY(0px);
     }}
 
     QPushButton:disabled {{
@@ -104,9 +111,9 @@ def create_professional_stylesheet():
     /* Jog Control Buttons */
     QPushButton#jogButton {{
         background-color: {ProfessionalColors.PRIMARY_BLUE};
-        min-width: 80px;
-        min-height: 80px;
-        font-size: 16px;
+        min-width: 70px;
+        min-height: 60px;
+        font-size: 14px;
         font-weight: 700;
         border-radius: 12px;
     }}
@@ -123,9 +130,9 @@ def create_professional_stylesheet():
     /* Emergency Button */
     QPushButton#emergencyButton {{
         background-color: {ProfessionalColors.ERROR_RED};
-        min-width: 200px;
-        min-height: 100px;
-        font-size: 18px;
+        min-width: 140px;
+        min-height: 70px;
+        font-size: 16px;
         font-weight: 800;
         border-radius: 16px;
         color: {ProfessionalColors.TEXT_WHITE};
@@ -142,7 +149,7 @@ def create_professional_stylesheet():
     /* Connect Button (Green) */
     QPushButton#connectButton {{
         background-color: {ProfessionalColors.SUCCESS_GREEN};
-        min-height: 48px;
+        min-height: 40px;
         font-size: 14px;
         font-weight: 600;
     }}
@@ -154,7 +161,7 @@ def create_professional_stylesheet():
     /* Disconnect Button (Red) */
     QPushButton#disconnectButton {{
         background-color: {ProfessionalColors.ERROR_RED};
-        min-height: 48px;
+        min-height: 40px;
         font-size: 14px;
         font-weight: 600;
     }}
@@ -210,20 +217,34 @@ def create_professional_stylesheet():
 
     QLabel#titleLabel {{
         color: {ProfessionalColors.PRIMARY_BLUE};
-        font-size: 16px;
+        font-size: 14px;
         font-weight: 700;
         margin-bottom: 8px;
     }}
 
     QLabel#valueLabel {{
         font-family: 'SF Mono', 'Fira Code', 'Roboto Mono', monospace;
-        font-size: 16px;
+        font-size: 14px;
         font-weight: 600;
         color: {ProfessionalColors.SUCCESS_GREEN};
         background-color: {ProfessionalColors.BACKGROUND_SECONDARY};
         padding: 8px 12px;
         border-radius: 6px;
         border: 1px solid {ProfessionalColors.BORDER_LIGHT};
+    }}
+
+    /* Position panel (TCP / Joint angles) - compact, uniform */
+    QGroupBox#positionPanelGroup {{
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QGroupBox#positionPanelGroup::title {{
+        font-size: 13px;
+    }}
+    QLabel#positionPanelLabel {{
+        font-size: 13px;
+        color: {ProfessionalColors.TEXT_SECONDARY};
+        font-weight: 500;
     }}
 
     QLabel#statusLabel {{
@@ -296,6 +317,62 @@ def create_professional_stylesheet():
     QScrollBar::handle:vertical:hover {{
         background-color: {ProfessionalColors.BORDER_DARK};
     }}
+
+    /* SpinBox / DoubleSpinBox - large touch-friendly up/down buttons (not the text box)
+       To change arrow button size: edit width (default 48px) and min-height (default 28px) below.
+       Up button shows +, down button shows - for visibility. */
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 48px;
+        min-height: 28px;
+        border-left: 1px solid {ProfessionalColors.BORDER_LIGHT};
+        border-top-right-radius: 6px;
+        background-color: {ProfessionalColors.BACKGROUND_SECONDARY};
+    }}
+
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+        image: url("{_SPINBOX_PLUS_ICON}");
+        width: 22px;
+        height: 22px;
+    }}
+
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {{
+        background-color: {ProfessionalColors.BORDER_LIGHT};
+    }}
+
+    QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed {{
+        background-color: {ProfessionalColors.BORDER_MEDIUM};
+    }}
+
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 48px;
+        min-height: 28px;
+        border-left: 1px solid {ProfessionalColors.BORDER_LIGHT};
+        border-bottom-right-radius: 6px;
+        background-color: {ProfessionalColors.BACKGROUND_SECONDARY};
+    }}
+
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        image: url("{_SPINBOX_MINUS_ICON}");
+        width: 22px;
+        height: 22px;
+    }}
+
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+        background-color: {ProfessionalColors.BORDER_LIGHT};
+    }}
+
+    QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+        background-color: {ProfessionalColors.BORDER_MEDIUM};
+    }}
+
+    /* Reserve space for the button strip so the number doesn't overlap */
+    QSpinBox, QDoubleSpinBox {{
+        padding-right: 50px;
+    }}
     """
 
 
@@ -309,7 +386,7 @@ def create_jog_mode_buttons_style():
         border-radius: 8px;
         font-weight: 600;
         font-size: 14px;
-        min-height: 44px;
+        min-height: 36px;
         padding: 12px 24px;
         margin: 2px;
     }}

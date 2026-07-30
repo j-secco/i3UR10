@@ -231,11 +231,18 @@ class WebSocketController:
             v, a, r = wp[6], wp[7], wp[8]
             joints_str = "[" + ", ".join(f"{q:.6f}" for q in joints) + "]"
             lines.append(f"    movej({joints_str}, a={a}, v={v}, r={r})")
-        # Brake-free strategy: this UR firmware engages brakes during both
-        # sleep() and sync()-loop URScript pauses, so we emit NO pause.
-        # Cycles flow continuously; cycle_delay_s is honoured only by the
-        # Python notify clock, not by the robot.
-        _ = cycle_delay_s  # kept for API compatibility
+        if cycle_delay_s > 0:
+            # Active hold via sync-loop instead of sleep() so the robot
+            # controller stays "running" (no brake engagement).
+            # sync() waits one robot cycle (~8ms CB3 / ~2ms e-Series).
+            # Use 125 Hz (CB3 native) as the conversion; on e-Series this
+            # yields ~1/4 of the requested seconds, still well within range.
+            ticks = max(1, int(cycle_delay_s * 125))
+            lines.append(f"    local _hold_i = 0")
+            lines.append(f"    while _hold_i < {ticks}:")
+            lines.append(f"      sync()")
+            lines.append(f"      _hold_i = _hold_i + 1")
+            lines.append(f"    end")
         lines.append("  end")
         lines.append("end")
         lines.append("jsecco_demo_loop()")

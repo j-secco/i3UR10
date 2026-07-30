@@ -18,3 +18,7 @@ numpy>=1.25.0     # Required by scipy
 # Optional: For advanced robot communication
 pymodbus>=3.5.0  # For Modbus TCP communication
 #urx>=0.11.0      # Alternative UR control library
+
+# RTDE motion backend (optional; set robot.use_rtde_for_motion in config)
+# Requires: Linux: librtde (e.g. PPA sdurobotics/ur-rtde) or build from source
+ur_rtde>=1.5.0

@@ -17,15 +17,17 @@ class JointJog:
     Joint space jogging controller using UR10 speedj() commands.
     """
     
-    def __init__(self, websocket_controller, config: Dict[str, Any]):
+    def __init__(self, websocket_controller, config: Dict[str, Any], websocket_receiver=None):
         """
         Initialize Joint jog controller.
-        
+
         Args:
             websocket_controller: WebSocket communication interface
             config: Joint jogging configuration
+            websocket_receiver: Optional real-time receiver for current joint angles (needed for step jog)
         """
         self.websocket_controller = websocket_controller
+        self.websocket_receiver = websocket_receiver
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
         
@@ -35,9 +37,9 @@ class JointJog:
         self.current_direction = None
         self.current_speed_scale = 1.0
         
-        # Configuration parameters
-        self.max_joint_speed = config.get('max_joint_speed', 1.05)  # rad/s
-        self.joint_acceleration = config.get('joint_acceleration', 1.4)  # rad/s^2
+        # Configuration parameters (conservative defaults to reduce protective stops)
+        self.max_joint_speed = config.get('max_joint_speed', 0.4)  # rad/s
+        self.joint_acceleration = config.get('joint_acceleration', 0.8)  # rad/s^2
         
         # Step sizes for step jogging
         self.joint_step_sizes = config.get('joint_step_sizes', [0.017, 0.087, 0.175, 0.524, 1.047])  # radians
@@ -75,8 +77,8 @@ class JointJog:
             # Set speed for the specified joint
             joint_speeds[axis] = direction * self.max_joint_speed * speed_scale
             
-            # Send speedj command
-            success = self.websocket_controller.speed_joint(joint_speeds, self.joint_acceleration, 0.0)
+            # Send speedj command with positive time_limit so robot stops if no follow-up (safer)
+            success = self.websocket_controller.speed_joint(joint_speeds, self.joint_acceleration, 0.2)
             
             if success:
                 self.active = True
@@ -121,22 +123,29 @@ class JointJog:
             return False
             
         try:
+            # Get current joint positions from robot (required for correct step target)
+            if self.websocket_receiver and self.websocket_receiver.is_connected():
+                current_joints = list(self.websocket_receiver.get_joint_angles())
+            else:
+                self.logger.warning("No receiver or not connected - cannot execute step jog safely")
+                return False
+
+            if len(current_joints) != 6:
+                self.logger.warning("Invalid joint angles from receiver")
+                return False
+
             # Get step size
             if step_index < len(self.joint_step_sizes):
                 step_size = self.joint_step_sizes[step_index]
             else:
                 step_size = self.joint_step_sizes[-1]
-            
-            # Get current joint positions
-            # Note: This would normally come from robot state, using zeros for now
-            current_joints = [0.0] * 6
-            
-            # Calculate target joint positions
+
+            # Calculate target joint positions from current
             target_joints = current_joints.copy()
             target_joints[axis] += direction * step_size
             
-            # Use movej for step movement with moderate speed
-            step_speed = 0.5  # rad/s
+            # Use movej for step movement with moderate speed (conservative for safety)
+            step_speed = 0.3  # rad/s
             
             success = self.websocket_controller.move_joint(target_joints, step_speed, self.joint_acceleration, 0.0)
             
@@ -162,9 +171,9 @@ class JointJog:
             # Signal stop to monitoring thread
             self.stop_event.set()
             
-            # Send stop command
+            # Send stop command with moderate deceleration to avoid protective stop
             if self.websocket_controller:
-                success = self.websocket_controller.stop_joint(8.0)  # 8 rad/s^2 deceleration
+                success = self.websocket_controller.stop_joint(3.0)  # rad/s^2
             else:
                 success = False
             

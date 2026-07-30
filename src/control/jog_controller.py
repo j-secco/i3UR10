@@ -21,12 +21,22 @@ try:
     from control.cartesian_jog import CartesianJog
     from control.joint_jog import JointJog
     from control.safety_monitor import SafetyMonitor
+    try:
+        from communication.rtde_controller import RTDEController, RTDE_AVAILABLE
+    except ImportError:
+        RTDEController = None
+        RTDE_AVAILABLE = False
 except ImportError:
     try:
         from ..communication import WebSocketController, WebSocketReceiver, DashboardClient
         from .cartesian_jog import CartesianJog
         from .joint_jog import JointJog  
         from .safety_monitor import SafetyMonitor
+        try:
+            from ..communication.rtde_controller import RTDEController, RTDE_AVAILABLE
+        except ImportError:
+            RTDEController = None
+            RTDE_AVAILABLE = False
     except ImportError:
         # Fallback to direct imports if running from src directory
         import sys
@@ -38,6 +48,11 @@ except ImportError:
         from control.cartesian_jog import CartesianJog
         from control.joint_jog import JointJog
         from control.safety_monitor import SafetyMonitor
+        try:
+            from communication.rtde_controller import RTDEController, RTDE_AVAILABLE
+        except ImportError:
+            RTDEController = None
+            RTDE_AVAILABLE = False
 
 class JogMode(Enum):
     """Jogging mode enumeration."""
@@ -75,6 +90,8 @@ class JogController:
         robot_config = self.config.get('robot', {})
         hostname = robot_config.get('ip_address', '192.168.1.100')
         ports = robot_config.get('ports', {})
+        use_rtde_for_motion = robot_config.get('use_rtde_for_motion', False)
+        rtde_port = ports.get('rtde', 30004)
 
         # Check if we're in simulation mode
         self.simulation_mode = self.config.get('debug', {}).get('simulate_robot', False)
@@ -86,14 +103,29 @@ class JogController:
             self.websocket_controller = None
             self.websocket_receiver = None
             self.dashboard_client = None
+            self._use_rtde_motion = False
         else:
             # Normal mode - create real connections
             try:
-                self.websocket_controller = WebSocketController(
-                    hostname,
-                    port=ports.get('primary', 30001),
-                    timeout=robot_config.get('websocket_timeout', 5.0)
-                )
+                if use_rtde_for_motion and RTDE_AVAILABLE and RTDEController:
+                    self.websocket_controller = RTDEController(
+                        hostname,
+                        port=rtde_port,
+                        frequency=125.0
+                    )
+                    self._use_rtde_motion = True
+                    self.logger.info("Using RTDE for motion (port %s)", rtde_port)
+                else:
+                    if use_rtde_for_motion and not (RTDE_AVAILABLE and RTDEController):
+                        self.logger.warning(
+                            "use_rtde_for_motion is True but ur_rtde not available; using Primary (30001)"
+                        )
+                    self.websocket_controller = WebSocketController(
+                        hostname,
+                        port=ports.get('primary', 30001),
+                        timeout=robot_config.get('websocket_timeout', 5.0)
+                    )
+                    self._use_rtde_motion = False
                 self.websocket_receiver = WebSocketReceiver(
                     hostname,
                     port=ports.get('realtime', 30003),
@@ -113,6 +145,7 @@ class JogController:
                 self.websocket_controller = None
                 self.websocket_receiver = None
                 self.dashboard_client = None
+                self._use_rtde_motion = False
         
         # Jog controllers - will be initialized when communication is available
         self.cartesian_jog = None
@@ -136,6 +169,7 @@ class JogController:
         self.status_callbacks: List[Callable[[Dict], None]] = []
         self.safety_callbacks: List[Callable[[Dict], None]] = []
         self.connection_callbacks: List[Callable[[bool], None]] = []
+        self.position_fetched_callbacks: List[Callable[[], None]] = []
         
         # Status data
         self.robot_status = {
@@ -149,6 +183,8 @@ class JogController:
             'emergency_stopped': False,
             'protective_stopped': False,
             'connection_status': 'DISCONNECTED',
+            'robot_error': '',
+            'robot_warning': '',
             'jog_mode': self.current_mode.value,
             'jog_type': self.current_type.value,
             'jogging_active': False
@@ -219,15 +255,17 @@ class JogController:
         
         try:
             jogging_config = self.config.get('jogging', {})
-            
-            # Jog controllers
+
+            # Jog controllers need receiver for step jog (current position)
             self.cartesian_jog = CartesianJog(
                 self.websocket_controller,
-                jogging_config.get('cartesian', {})
+                jogging_config.get('cartesian', {}),
+                self.websocket_receiver
             )
             self.joint_jog = JointJog(
                 self.websocket_controller,
-                jogging_config.get('joint', {})
+                jogging_config.get('joint', {}),
+                self.websocket_receiver
             )
             
             # Safety monitor
@@ -246,7 +284,85 @@ class JogController:
         except Exception as e:
             self.logger.error(f"Failed to initialize jog controllers: {e}")
             return False
-    
+
+    def _ensure_robot_position_available(self) -> None:
+        """
+        On connect: wait briefly for position from realtime stream, then if still no position
+        request once from primary interface so the app has current robot position (e.g. for Save as home).
+        When using RTDE for motion, primary is not connected; position comes only from receiver.
+        """
+        if not self.websocket_receiver or not self.websocket_controller:
+            return
+        wait_s = 3.0
+        poll_interval = 0.2
+        elapsed = 0.0
+        while elapsed < wait_s:
+            if self.websocket_receiver.has_valid_position():
+                self.logger.info("Robot position received from realtime stream")
+                return
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        if getattr(self, '_use_rtde_motion', False):
+            self.logger.warning("No position from realtime within %.1fs (RTDE mode; position from receiver only)", wait_s)
+            return
+        self.logger.info("No position from realtime within %.1fs, requesting from primary", wait_s)
+        joints = self.websocket_controller.request_joint_positions(wait_s=1.5)
+        if joints and len(joints) == 6 and any(abs(q) >= 0.01 for q in joints):
+            self.websocket_receiver.set_joint_angles(joints)
+            self.robot_status['joint_angles'] = joints
+            self.logger.info("Robot position set from primary interface")
+        else:
+            self.logger.warning("Could not get robot position from primary interface")
+
+    def _fetch_position_after_connect(self) -> None:
+        """
+        Run in background after connect: pull position from robot.
+        First wait briefly for realtime (30003); if no position and using Primary,
+        use primary (30001) binary robot state stream. When using RTDE, position
+        comes only from realtime stream.
+        """
+        if not self.websocket_receiver or not self.websocket_controller:
+            return
+        time.sleep(0.3)
+        wait_realtime_s = 1.0
+        poll_interval = 0.2
+        elapsed = 0.0
+        while elapsed < wait_realtime_s and self.connected:
+            if self.websocket_receiver.has_valid_position():
+                self.logger.info("Robot position received from realtime stream (port 30003)")
+                self._notify_position_fetched()
+                return
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        if getattr(self, '_use_rtde_motion', False):
+            self._notify_position_fetched()
+            return
+        if self.websocket_controller.has_valid_position():
+            joints = self.websocket_controller.get_joint_angles()
+            if joints and len(joints) == 6:
+                self.websocket_receiver.set_joint_angles(joints, notify=False)
+                self.robot_status["joint_angles"] = joints
+                self.logger.info("Robot position updated from primary interface (port 30001)")
+        else:
+            joints = self.websocket_controller.request_joint_positions(wait_s=2.0)
+            if joints and len(joints) == 6 and any(abs(q) >= 0.01 for q in joints):
+                self.websocket_receiver.set_joint_angles(joints, notify=False)
+                self.robot_status["joint_angles"] = joints
+                self.logger.info("Robot position updated from primary interface (port 30001)")
+        self._notify_position_fetched()
+
+    def _notify_position_fetched(self) -> None:
+        """Call registered callbacks so UI can update on main thread."""
+        for cb in self.position_fetched_callbacks:
+            try:
+                cb()
+            except Exception as e:
+                self.logger.error("Position fetched callback error: %s", e)
+
+    def add_position_fetched_callback(self, callback: Callable[[], None]) -> None:
+        """Register callback to run when position has been fetched from robot (e.g. to refresh UI on main thread)."""
+        self.position_fetched_callbacks.append(callback)
+
     def _setup_callbacks(self):
         """Setup callbacks for communication interfaces."""
         if not all([self.websocket_receiver, self.safety_monitor]):
@@ -288,28 +404,39 @@ class JogController:
                 if not self.websocket_controller:
                     self.logger.error("WebSocket controller not available")
                     return False
-                
-                # Connect to primary interface (commands)
-                if not self.websocket_controller.connect():
-                    self.logger.error("Failed to connect to primary interface")
-                    return False
-                
-                # Connect to real-time interface (data)
-                if not self.websocket_receiver.connect():
-                    self.logger.error("Failed to connect to real-time interface")
-                    self.websocket_controller.disconnect()
-                    return False
-                
-                # Connect to dashboard (status)
-                if not self.dashboard_client.connect():
-                    self.logger.warning("Dashboard connection failed (non-critical)")
+
+                # Connect order: when using RTDE, connect receiver and dashboard first;
+                # when using Primary, connect primary then receiver then dashboard.
+                use_rtde = getattr(self, '_use_rtde_motion', False)
+
+                if use_rtde:
+                    if not self.websocket_receiver.connect():
+                        self.logger.error("Failed to connect to real-time interface")
+                        return False
+                    if not self.dashboard_client.connect():
+                        self.logger.warning("Dashboard connection failed (non-critical)")
+                    if not self.websocket_controller.connect():
+                        self.logger.error("Failed to connect to RTDE interface")
+                        if self.websocket_receiver:
+                            self.websocket_receiver.disconnect()
+                        return False
+                else:
+                    if not self.websocket_controller.connect():
+                        self.logger.error("Failed to connect to primary interface")
+                        return False
+                    if not self.websocket_receiver.connect():
+                        self.logger.error("Failed to connect to real-time interface")
+                        self.websocket_controller.disconnect()
+                        return False
+                    if not self.dashboard_client.connect():
+                        self.logger.warning("Dashboard connection failed (non-critical)")
                 
                 # Initialize jog controllers
                 if not self._initialize_jog_controllers():
                     self.logger.error("Failed to initialize jog controllers")
                     self.disconnect()
                     return False
-                
+
                 # Start safety monitoring
                 if self.safety_monitor:
                     self.safety_monitor.start()
@@ -322,8 +449,16 @@ class JogController:
                 self.connected = True
                 self.robot_status['connection_status'] = 'CONNECTED'
                 
+                # Immediate safety/status read so UI sees protective stop right after connect
+                # (status loop may take ~0.5s before first Dashboard poll)
+                self._update_status_from_dashboard_once()
+                
                 self.logger.info("Successfully connected to UR10")
                 self._notify_connection_callbacks(True)
+
+                # Pull position from robot in background so UI does not lag
+                threading.Thread(target=self._fetch_position_after_connect, daemon=True).start()
+
                 return True
                 
             except Exception as e:
@@ -538,7 +673,33 @@ class JogController:
         except Exception as e:
             self.logger.error(f"Error stopping current jog: {e}")
             return False
-    
+
+    def _update_status_from_dashboard_once(self):
+        """Run one Dashboard poll and update robot_status. Used right after connect so the UI sees protective stop immediately."""
+        if not self.dashboard_client or not self.dashboard_client.is_connected():
+            return
+        try:
+            safety_str = self.dashboard_client.get_safety_mode()
+            mode_str = self.dashboard_client.get_robot_mode()
+            if safety_str is not None:
+                self.robot_status['safety_mode'] = safety_str
+                s = (safety_str or "").upper()
+                # PROTECTIVE_STOP = 3; response may be "PROTECTIVE_STOP" or "Safetymode: 3" etc.
+                self.robot_status['protective_stopped'] = (
+                    "PROTECTIVE_STOP" in s or "PROTECTIVE" in s or ": 3" in s or s.strip() == "3"
+                )
+            if mode_str is not None:
+                self.robot_status['robot_mode'] = mode_str
+            self.robot_status['remote_control'] = self.dashboard_client.is_in_remote_control()
+            err = self.dashboard_client.get_error()
+            if err is not None:
+                self.robot_status['robot_error'] = err
+            warn = self.dashboard_client.get_warning()
+            if warn is not None:
+                self.robot_status['robot_warning'] = warn
+        except Exception as e:
+            self.logger.debug("Initial dashboard status: %s", e)
+
     def _status_loop(self):
         """Status monitoring loop running in separate thread."""
         status_counter = 0
@@ -576,10 +737,33 @@ class JogController:
                         self.logger.warning(f"Failed to get robot position: {e}")
                         # Don't update position - keep showing last known values
                 
-                # Update status from dashboard if available
+                # Update status from dashboard if available (safety mode, robot mode, errors)
                 if self.dashboard_client and self.dashboard_client.is_connected():
-                    # Dashboard status update will be implemented later
-                    pass
+                    try:
+                        if status_counter % 2 == 0:
+                            safety_str = self.dashboard_client.get_safety_mode()
+                            mode_str = self.dashboard_client.get_robot_mode()
+                            if safety_str is not None:
+                                self.robot_status['safety_mode'] = safety_str
+                                was_protective = self.robot_status.get('protective_stopped', False)
+                                s = (safety_str or "").upper()
+                                self.robot_status['protective_stopped'] = (
+                                    "PROTECTIVE_STOP" in s or "PROTECTIVE" in s or ": 3" in s or s.strip() == "3"
+                                )
+                                if self.robot_status['protective_stopped'] and not was_protective:
+                                    self._on_protective_stop()
+                            if mode_str is not None:
+                                self.robot_status['robot_mode'] = mode_str
+                            remote = self.dashboard_client.is_in_remote_control()
+                            self.robot_status['remote_control'] = remote
+                            err = self.dashboard_client.get_error()
+                            if err is not None:
+                                self.robot_status['robot_error'] = err
+                            warn = self.dashboard_client.get_warning()
+                            if warn is not None:
+                                self.robot_status['robot_warning'] = warn
+                    except Exception as e:
+                        self.logger.debug("Dashboard status update: %s", e)
                 
                 # Notify status callbacks
                 self._notify_status_callbacks()

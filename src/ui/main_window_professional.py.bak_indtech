@@ -41,14 +41,6 @@ from control.demo_runner import DemoRunner
 from control.wave_demo import WaveDemo
 from control.bow_demo import BowDemo
 from control.pendulum_demo import PendulumDemo
-from control.industrial_demo import IndustrialDemo
-from control.technical_demo import TechnicalDemo
-from control.sprint_demo import SprintDemo
-from control.plunge_demo import PlungeDemo
-from control.reach_demo import ReachDemo
-from control.sorting_demo import SortingDemo
-from control.juggle_demo import JuggleDemo
-from control.stacking_demo import StackingDemo
 from ui.widgets.config_dialog import ConfigDialog
 
 # Import new professional styling
@@ -76,6 +68,11 @@ class ProfessionalMainWindow(QMainWindow):
     Professional main window for UR10 jog control interface.
     Clean, modern design optimized for industrial touchscreen use.
     """
+
+    # Signals for UI updates
+    position_updated = pyqtSignal(dict)
+    safety_status_changed = pyqtSignal(dict)
+    connection_status_changed = pyqtSignal(bool, str)
 
     def __init__(self, config: Dict[str, Any], parent: Optional[QWidget] = None):
         """Initialize the professional main window."""
@@ -118,6 +115,7 @@ class ProfessionalMainWindow(QMainWindow):
         self._setup_ui()
         self._apply_styling()
         self._setup_timers()
+        self._connect_signals()
         self._install_demo_log_handler()
         self.logger.info("Professional main window initialized")
 
@@ -598,15 +596,6 @@ class ProfessionalMainWindow(QMainWindow):
         save_log_btn.setToolTip("Save current log content to logs/demo_snapshot_<timestamp>.txt")
         logs_layout.addWidget(save_log_btn)
 
-        # Export all logs button: bundle logs/ + config/ into a timestamped zip.
-        export_logs_btn = QPushButton("Export all logs")
-        export_logs_btn.setObjectName("secondaryButton")
-        export_logs_btn.setMinimumHeight(40)
-        export_logs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        export_logs_btn.clicked.connect(self._export_logs)
-        export_logs_btn.setToolTip("Bundle all logs and config into one .zip on a USB drive (if mounted) or the Desktop")
-        logs_layout.addWidget(export_logs_btn)
-
     def _create_demo_section(self, layout: QVBoxLayout):
         """Create Demo button above Exit application."""
         self.demo_button = QPushButton("Demo")
@@ -762,26 +751,15 @@ class ProfessionalMainWindow(QMainWindow):
         top.addStretch()
         layout.addLayout(top)
 
-        # Demo cards in a scrollable grid (the touchscreen can\u2019t fit all of them).
-        cards_widget = QWidget()
-        cards_widget.setStyleSheet("background-color: transparent;")
-        cards_layout = QGridLayout(cards_widget)
+        # Demo cards in a grid
+        cards_layout = QGridLayout()
         cards_layout.setSpacing(20)
-        cards_layout.setContentsMargins(4, 4, 4, 4)
 
         demos = [
             ("Demo", "Run a preset joint-space path in a loop. Connect, save home, then Start."),
             ("Wave & Greet", "Turn toward the audience, raise the arm, and wave. Showcase demo for visitors."),
             ("Bow", "Theatrical ceremonial bow with a held apex pose. Slow and deliberate."),
             ("Pendulum", "Hypnotic side-to-side swing with natural wind-down. Continuous flow."),
-            ("Industrial", "Pick-and-place pantomime: approach, descend, grasp, transport, release, retreat."),
-            ("Technical", "Per-axis capability tour: J1 through J6 individually, then a coordinated finale."),
-            ("Sprint", "Fast lateral back-and-forth with rapid acceleration. Athletic and punchy."),
-            ("Plunge", "Slow controlled descents contrasted with snap-back rises. ~5.5\u00d7 speed contrast."),
-            ("Reach", "Long extended sweeps showing full workspace. Big sideways arcs with arm extended."),
-            ("Sorting", "Pick from intake, sort into 3 different bins per cycle. Methodical pick-and-place."),
-            ("Juggle", "Rapid alternation between two stations with brief touches \u2014 juggling rhythm."),
-            ("Stacking", "Build a 3-piece tower: each successive piece placed at a higher level."),
             ("Record & Replay", "Record your movements, then replay them (coming later)."),
         ]
         card_btn_style = (
@@ -803,25 +781,8 @@ class ProfessionalMainWindow(QMainWindow):
             row, col = i // 2, i % 2
             cards_layout.addWidget(card_btn, row, col)
 
-        scroll = QScrollArea()
-        scroll.setWidget(cards_widget)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setStyleSheet(
-            "QScrollArea { background-color: transparent; border: none; } "
-            "QScrollBar:vertical { background: #F1F3F5; width: 14px; border-radius: 7px; } "
-            "QScrollBar::handle:vertical { background: #ADB5BD; min-height: 30px; border-radius: 7px; } "
-            "QScrollBar::handle:vertical:hover { background: #6C757D; } "
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        )
-        # Touch-friendly kinetic scrolling \u2014 swipe the cards by dragging.
-        try:
-            from PyQt6.QtWidgets import QScroller
-            QScroller.grabGesture(scroll.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
-        except Exception:
-            pass
-        layout.addWidget(scroll, stretch=1)
+        layout.addLayout(cards_layout)
+        layout.addStretch()
         return page
 
     def _create_loop_demo_screen(self) -> QWidget:
@@ -892,17 +853,9 @@ class ProfessionalMainWindow(QMainWindow):
         self.loop_demo_speed_label.setStyleSheet(TOUCH_LABEL_FONT)
         speed_row.addWidget(self.loop_demo_speed_label)
         speed_row.addStretch()
-        # Debounced auto-restart: when the user settles the slider on a new
-        # value, restart the running demo so the new speed_scale takes effect.
-        # (URScript bakes the speed at Start; restart is the cleanest path.)
-        self._speed_slider_debounce = QTimer(self)
-        self._speed_slider_debounce.setSingleShot(True)
-        self._speed_slider_debounce.setInterval(450)
-        self._speed_slider_debounce.timeout.connect(self._on_speed_slider_settled)
-        def _on_speed_changed(v):
-            self.loop_demo_speed_label.setText(f"{v}%")
-            self._speed_slider_debounce.start()
-        self.loop_demo_speed_slider.valueChanged.connect(_on_speed_changed)
+        self.loop_demo_speed_slider.valueChanged.connect(
+            lambda v: self.loop_demo_speed_label.setText(f"{v}%")
+        )
         layout.addLayout(speed_row)
 
         # Cycle delay (pause between full loops)
@@ -1089,33 +1042,6 @@ class ProfessionalMainWindow(QMainWindow):
             # if so, force-update UI to Stopped (covers any notify-chain glitch).
             QTimer.singleShot(500, lambda: self._loop_demo_check_stopped(0))
 
-    def _on_speed_slider_settled(self) -> None:
-        """When the user settles on a new speed, restart the running demo."""
-        runner = self.loop_demo_runner
-        if runner is None or not runner.is_running():
-            return  # idle: slider takes effect on next Start
-        active_class = getattr(self, "_active_demo_class", None)
-        if active_class is None:
-            return
-        self.add_log_message(
-            f"Speed changed to {self.loop_demo_speed_slider.value()}%; restarting demo",
-            "INFO",
-        )
-        self._loop_demo_stop()
-        # Wait for stop to complete, then restart with current slider value.
-        QTimer.singleShot(900, self._restart_after_speed_change)
-
-    def _restart_after_speed_change(self, attempt: int = 0) -> None:
-        runner = self.loop_demo_runner
-        if runner is not None and runner.is_running():
-            if attempt >= 20:  # ~6s of 300ms retries -- give up instead of looping forever
-                self.add_log_message(
-                    "Speed change: demo did not stop in time; restart aborted", "WARNING")
-                return
-            QTimer.singleShot(300, lambda: self._restart_after_speed_change(attempt + 1))
-            return
-        self._loop_demo_start()
-
     def _loop_demo_check_stopped(self, attempt: int) -> None:
         """Poll runner state; force UI to Stopped once is_running() == False."""
         runner = self.loop_demo_runner
@@ -1173,7 +1099,7 @@ class ProfessionalMainWindow(QMainWindow):
 
     def _on_demo_card_clicked(self, demo_name: str):
         """Handle demo card selection: open Demo screen or show placeholder."""
-        runnable = {"Demo": DemoRunner, "Wave & Greet": WaveDemo, "Bow": BowDemo, "Pendulum": PendulumDemo, "Industrial": IndustrialDemo, "Technical": TechnicalDemo, "Sprint": SprintDemo, "Plunge": PlungeDemo, "Reach": ReachDemo, "Sorting": SortingDemo, "Juggle": JuggleDemo, "Stacking": StackingDemo}
+        runnable = {"Demo": DemoRunner, "Wave & Greet": WaveDemo, "Bow": BowDemo, "Pendulum": PendulumDemo}
         if demo_name in runnable:
             self._active_demo_class = runnable[demo_name]
             self.stacked.setCurrentWidget(self.loop_demo_page)
@@ -1199,19 +1125,18 @@ class ProfessionalMainWindow(QMainWindow):
         self.setStyleSheet(complete_style)
 
     def _setup_timers(self):
-        """Set up update timers and start them at the configured intervals."""
+        """Set up update timers."""
+        # Position update timer
         self.position_timer.timeout.connect(self._update_position_display)
-        self.status_timer.timeout.connect(self._update_status_display)
-        self._apply_timer_intervals()
+        self.position_timer.start(100)  # 10 Hz
 
-    def _apply_timer_intervals(self):
-        """(Re)start the UI timers using the intervals from config (ms).
-        Called at startup and again whenever the Settings dialog changes them."""
-        refresh = self.config.get("ui", {}).get("refresh", {})
-        pos_ms = max(20, int(refresh.get("position_display", 100)))
-        status_ms = max(20, int(refresh.get("status_display", 200)))
-        self.position_timer.start(pos_ms)   # QTimer.start() restarts if already running
-        self.status_timer.start(status_ms)
+        # Status update timer
+        self.status_timer.timeout.connect(self._update_status_display)
+        self.status_timer.start(200)  # 5 Hz
+
+    def _connect_signals(self):
+        """Connect internal signals."""
+        pass
 
     # Event Handlers
     def _set_jog_mode(self, mode: str):
@@ -1222,20 +1147,20 @@ class ProfessionalMainWindow(QMainWindow):
         self.logger.info(f"Jog mode set to: {mode}")
 
     def _on_speed_changed(self, value: int):
-        """Handle jog speed slider changes. The value is applied as the
-        speed_scale on the next _start_jog() call."""
-        self.speed_label.setText(f"Speed: {value}%")
+        """Handle speed slider changes."""
+        speed = value / 100.0  # Convert to 0.0-1.0 range
+        self.speed_label.setText(f"Current Speed: {speed:.2f} m/s")
+        # Note: JogController doesn't have set_jog_speed method
+        # Speed is handled by the speed_scale parameter in start_jog()
 
     def _start_jog(self, axis: str, direction: int):
-        """Start jogging in the specified direction at the slider's speed."""
+        """Start jogging in specified direction."""
         if self.jog_controller:
             # Map axis names to indices
             axis_map = {'x': 0, 'y': 1, 'z': 2, 'rx': 3, 'ry': 4, 'rz': 5,
                        'j1': 0, 'j2': 1, 'j3': 2, 'j4': 3, 'j5': 4, 'j6': 5}
             axis_index = axis_map.get(axis, 0)
-            # Wire the speed slider through as speed_scale (0.01-1.0).
-            speed_scale = max(0.01, min(1.0, self.speed_slider.value() / 100.0))
-            self.jog_controller.start_jog(axis_index, direction, speed_scale)
+            self.jog_controller.start_jog(axis_index, direction)
         self.logger.debug(f"Started jogging {axis} in direction {direction}")
 
     def _stop_jog(self):
@@ -1308,8 +1233,6 @@ class ProfessionalMainWindow(QMainWindow):
                     # Update displayed IP address
                     robot_ip = self.config.get('robot', {}).get('ip_address', 'Unknown')
                     self.ip_value_label.setText(robot_ip)
-                    # Apply any changed UI refresh rates to the running timers.
-                    self._apply_timer_intervals()
                     self.logger.info("Configuration updated")
                     self.add_log_message("Configuration updated", "INFO")
         except ImportError:
@@ -1373,16 +1296,8 @@ class ProfessionalMainWindow(QMainWindow):
                     )
             else:
                 self._protective_stop_logged = False
-                # Auto-hide the overlay once the stop has genuinely cleared.
-                # Require several consecutive False polls so a one-poll flicker
-                # cannot dismiss it; this also covers a stop cleared externally
-                # on the teach pendant (previously the overlay stuck forever).
-                if hasattr(self, "_protective_stop_overlay") and self._protective_stop_overlay.isVisible():
-                    self._protective_stop_clear_count += 1
-                    if self._protective_stop_clear_count >= 5:  # ~1s at 5 Hz
-                        self._protective_stop_overlay.hide()
-                        self._protective_stop_clear_count = 0
-                        self.add_log_message("Protective stop cleared.", "INFO")
+                # Do not auto-hide the overlay when status says False (e.g. polling flicker).
+                # Overlay is hidden only when the user clicks "Unlock protective stop" in _on_protective_stop_unlock_clicked.
 
         except Exception as e:
             self.logger.error(f"Error updating status display: {e}")
@@ -1428,53 +1343,6 @@ class ProfessionalMainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Save log failed", "Could not save log: %s" % e)
 
-    def _export_logs(self) -> None:
-        """Bundle logs/ and config/ into one timestamped .zip.
-
-        Destination: a writable USB mounted under /media/<user>/ if present,
-        otherwise the Desktop. Lets the operator hand over all diagnostics in
-        one file without hunting through the filesystem.
-        """
-        import os
-        import zipfile
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archive_name = "i3UR10_logs_%s.zip" % timestamp
-
-            # Prefer a writable USB drive under /media/<user>/; else the Desktop.
-            dest_dir, dest_kind = Path.home() / "Desktop", "Desktop"
-            media_root = Path("/media") / Path.home().name
-            if media_root.is_dir():
-                for entry in sorted(media_root.iterdir()):
-                    if entry.is_dir() and os.access(entry, os.W_OK):
-                        dest_dir, dest_kind = entry, "USB drive (%s)" % entry.name
-                        break
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            archive_path = dest_dir / archive_name
-
-            files_added = 0
-            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for folder in ("logs", "config"):
-                    base = Path(folder)
-                    if not base.is_dir():
-                        continue
-                    for f in sorted(base.rglob("*")):
-                        if f.is_file():
-                            zf.write(f, str(f))
-                            files_added += 1
-
-            if files_added == 0:
-                QMessageBox.warning(self, "Export logs",
-                                    "No log or config files were found to export.")
-                return
-            QMessageBox.information(
-                self, "Logs exported",
-                "Exported %d file(s) to %s:\n%s" % (files_added, dest_kind, archive_path.resolve()),
-            )
-            self.add_log_message("Logs exported to %s" % archive_path, "INFO")
-        except Exception as e:
-            QMessageBox.warning(self, "Export failed", "Could not export logs: %s" % e)
-
     def set_jog_controller(self, controller: JogController):
         """Set the jog controller instance."""
         self.jog_controller = controller
@@ -1484,13 +1352,7 @@ class ProfessionalMainWindow(QMainWindow):
             self.ip_value_label.setText(robot_ip)
 
             # Add position callback
-            # The controller fires this from a background thread; marshal it
-            # onto the Qt main thread before touching any widgets/state.
-            controller.add_position_callback(
-                lambda tcp, joints: QTimer.singleShot(
-                    0, lambda t=tcp, j=joints: self._on_position_updated(t, j)
-                )
-            )
+            controller.add_position_callback(self._on_position_updated)
 
             # When position is pulled from robot after connect, refresh UI on main thread
             controller.add_position_fetched_callback(
@@ -1538,6 +1400,10 @@ class ProfessionalMainWindow(QMainWindow):
 
         # Immediately trigger display update
         self._update_position_display()
+
+    def _on_status_updated(self, status_data):
+        """Handle status updates from controller."""
+        pass  # Handled in _update_status_display
 
     def _on_connection_status_changed(self, connected: bool, message: str = ""):
         """Handle connection status changes."""

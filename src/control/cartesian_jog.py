@@ -17,15 +17,17 @@ class CartesianJog:
     Cartesian space jogging controller using UR10 speedl() commands.
     """
     
-    def __init__(self, websocket_controller, config: Dict[str, Any]):
+    def __init__(self, websocket_controller, config: Dict[str, Any], websocket_receiver=None):
         """
         Initialize Cartesian jog controller.
-        
+
         Args:
             websocket_controller: WebSocket communication interface
             config: Cartesian jogging configuration
+            websocket_receiver: Optional real-time receiver for current TCP pose (needed for step jog)
         """
         self.websocket_controller = websocket_controller
+        self.websocket_receiver = websocket_receiver
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
         
@@ -35,11 +37,11 @@ class CartesianJog:
         self.current_direction = None
         self.current_speed_scale = 1.0
         
-        # Configuration parameters
-        self.max_linear_speed = config.get('max_linear_speed', 0.25)  # m/s
-        self.max_angular_speed = config.get('max_angular_speed', 0.75)  # rad/s
-        self.linear_acceleration = config.get('linear_acceleration', 1.2)  # m/s^2
-        self.angular_acceleration = config.get('angular_acceleration', 3.14)  # rad/s^2
+        # Configuration parameters (conservative defaults to reduce protective stops)
+        self.max_linear_speed = config.get('max_linear_speed', 0.1)  # m/s
+        self.max_angular_speed = config.get('max_angular_speed', 0.3)  # rad/s
+        self.linear_acceleration = config.get('linear_acceleration', 0.5)  # m/s^2
+        self.angular_acceleration = config.get('angular_acceleration', 1.0)  # rad/s^2
         
         # Step sizes for step jogging
         self.linear_step_sizes = config.get('linear_step_sizes', [0.001, 0.005, 0.01, 0.05, 0.1])  # meters
@@ -85,8 +87,8 @@ class CartesianJog:
             # Set velocity for the specified axis
             velocities[axis] = direction * max_speed * speed_scale
             
-            # Send speedl command
-            success = self.websocket_controller.speed_linear(velocities, acceleration, 0.0)
+            # Send speedl command with positive time_limit so robot stops if no follow-up (safer)
+            success = self.websocket_controller.speed_linear(velocities, acceleration, 0.2)
             
             if success:
                 self.active = True
@@ -131,6 +133,17 @@ class CartesianJog:
             return False
             
         try:
+            # Get current TCP pose from robot (required for correct step target)
+            if self.websocket_receiver and self.websocket_receiver.is_connected():
+                current_pose = list(self.websocket_receiver.get_tcp_pose())
+            else:
+                self.logger.warning("No receiver or not connected - cannot execute step jog safely")
+                return False
+
+            if len(current_pose) != 6:
+                self.logger.warning("Invalid TCP pose from receiver")
+                return False
+
             # Get step size
             if axis < 3:  # Linear axes
                 if step_index < len(self.linear_step_sizes):
@@ -142,17 +155,13 @@ class CartesianJog:
                     step_size = self.angular_step_sizes[step_index]
                 else:
                     step_size = self.angular_step_sizes[-1]
-            
-            # Get current TCP pose first
-            # Note: This would normally come from robot state, using zeros for now
-            current_pose = [0.0] * 6
-            
-            # Calculate target pose
+
+            # Calculate target pose from current
             target_pose = current_pose.copy()
             target_pose[axis] += direction * step_size
             
-            # Use movel for step movement with moderate speed
-            step_speed = 0.1 if axis < 3 else 0.5  # m/s for linear, rad/s for angular
+            # Use movel for step movement with moderate speed (conservative for safety)
+            step_speed = 0.05 if axis < 3 else 0.3  # m/s for linear, rad/s for angular
             acceleration = self.linear_acceleration if axis < 3 else self.angular_acceleration
             
             success = self.websocket_controller.move_linear(target_pose, step_speed, acceleration, 0.0)
@@ -179,9 +188,9 @@ class CartesianJog:
             # Signal stop to monitoring thread
             self.stop_event.set()
             
-            # Send stop command
+            # Send stop command with moderate deceleration to avoid protective stop
             if self.websocket_controller:
-                success = self.websocket_controller.stop_linear(10.0)  # 10 m/s^2 deceleration
+                success = self.websocket_controller.stop_linear(2.0)  # m/s^2
             else:
                 success = False
             
