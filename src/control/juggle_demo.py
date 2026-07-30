@@ -23,8 +23,8 @@ from typing import List, Optional, Callable, Any
 # ---------------------------------------------------------------------------
 # Safety caps — never exceed these values.
 # ---------------------------------------------------------------------------
-MAX_JOINT_SPEED_RAD_S   =  1.0
-MAX_JOINT_ACCEL_RAD_S2  =  1.5
+MAX_JOINT_SPEED_RAD_S   =  2.0
+MAX_JOINT_ACCEL_RAD_S2  =  3.5
 MAX_DELTA_FROM_HOME_RAD =  0.9
 
 

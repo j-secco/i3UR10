@@ -20,8 +20,8 @@ from typing import Any, Callable, List, Optional
 # ---------------------------------------------------------------------------
 # Safety caps (mandatory, matches SMOOTH_MOTION.md)
 # ---------------------------------------------------------------------------
-MAX_JOINT_SPEED_RAD_S   =  1.0
-MAX_JOINT_ACCEL_RAD_S2  =  1.5
+MAX_JOINT_SPEED_RAD_S   =  2.0
+MAX_JOINT_ACCEL_RAD_S2  =  3.5
 MAX_DELTA_FROM_HOME_RAD = 0.9
 
 # Depth is adapted to the CURRENT saved home at start (pose_guard): the deltas

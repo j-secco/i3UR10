@@ -211,11 +211,11 @@ class RunnerPage(QWidget):
 
         # Speed slider + live value label
         speed_box = QVBoxLayout()
-        self._speed_val_label = QLabel("Speed: 50%")
+        self._speed_val_label = QLabel("Speed: 100%")
         speed_box.addWidget(self._speed_val_label)
         self._speed_slider = QSlider(Qt.Orientation.Horizontal)
         self._speed_slider.setRange(10, 100)
-        self._speed_slider.setValue(50)
+        self._speed_slider.setValue(100)
         self._speed_slider.setMinimumHeight(BUTTON_H)
         self._speed_slider.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed

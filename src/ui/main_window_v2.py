@@ -977,8 +977,8 @@ class MainWindowV2(QMainWindow):
         cycle_delay = self.runner_page.cycle_delay_seconds()
 
         demo_cfg = self.config.get("demo", {})
-        joint_speed = float(demo_cfg.get("joint_speed", 0.35))
-        joint_accel = float(demo_cfg.get("joint_acceleration", 0.5))
+        joint_speed = float(demo_cfg.get("joint_speed", 0.9))
+        joint_accel = float(demo_cfg.get("joint_acceleration", 2.0))
         blend_radius = float(demo_cfg.get("blend_radius_rad", 0.10))
         send_interval = float(demo_cfg.get("send_interval_s", 0.08))
 

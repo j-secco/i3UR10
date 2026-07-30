@@ -18,8 +18,8 @@ from typing import List, Optional, Callable, Any
 # ---------------------------------------------------------------------------
 # Safety caps — never exceed these values.
 # ---------------------------------------------------------------------------
-MAX_JOINT_SPEED_RAD_S   =  1.0
-MAX_JOINT_ACCEL_RAD_S2  =  1.5
+MAX_JOINT_SPEED_RAD_S   =  2.0
+MAX_JOINT_ACCEL_RAD_S2  =  3.5
 MAX_DELTA_FROM_HOME_RAD = 0.9
 
 
@@ -130,15 +130,17 @@ class SprintDemo:
         DJ2_UP = -0.30   # J2 towards shoulder-up
         DJ3_FW =  0.20   # J3 fold forward → TCP high
 
-        # Sprint speed/accel (pushed close to caps)
-        V_SPRINT = 0.55   # rad/s  → 91.7 % of 0.6 cap
-        A_SPRINT = 0.90   # rad/s² → 90.0 % of 1.0 cap
+        # Sprint speed/accel: full-capability showcase. The J1/J2 hardware
+        # limit is 2.09 rad/s (120 deg/s); 1.80 rad/s is 86% of that, and
+        # the module caps (2.0 / 3.5) remain the hard ceiling.
+        V_SPRINT = 1.80   # rad/s
+        A_SPRINT = 3.00   # rad/s^2
 
         # Setup / lower / home speeds
-        V_SETUP  = 0.30
-        A_SETUP  = 0.60
-        V_LOWER  = 0.20
-        A_LOWER  = 0.40
+        V_SETUP  = 0.50
+        A_SETUP  = 1.20
+        V_LOWER  = 0.35
+        A_LOWER  = 0.80
 
         segs = [
             # 1. Setup: raise arm to sprint posture, medium speed

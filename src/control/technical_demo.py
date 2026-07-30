@@ -40,8 +40,8 @@ DEFAULT_SEND_INTERVAL_S = 0.08    # s between waypoint sends (fallback only)
 DEFAULT_CYCLE_DELAY_S   = 1.0     # s between full cycles (no-op in URScript)
 
 # Hard safety caps — never exceeded regardless of config.
-MAX_JOINT_SPEED_RAD_S   =  1.0
-MAX_JOINT_ACCEL_RAD_S2  =  1.5
+MAX_JOINT_SPEED_RAD_S   =  2.0
+MAX_JOINT_ACCEL_RAD_S2  =  3.5
 MAX_DELTA_FROM_HOME_RAD = 0.9    # per-joint absolute deviation from home
 
 # Per-segment speed multipliers (relative to base joint_speed).
