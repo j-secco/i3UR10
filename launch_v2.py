@@ -2,7 +2,7 @@
 
 Shows MainWindowV2 fullscreen on the Elo i3 touchscreen. The desktop icon
 (launch.sh) runs this. Escape closes it. To revert to the professional UI,
-restore launch.sh.bak_professional.
+use git history (tag pre-cleanup-20260730).
 
 Author: jsecco (R)
 """

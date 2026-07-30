@@ -1,7 +1,0 @@
-#!/bin/bash
-# UR10 Jog Control - Desktop Launcher
-# Author: jsecco (R)
-
-cd /home/ur10/Documents/i3UR10
-# Use venv Python explicitly (desktop launcher may have minimal PATH)
-exec /home/ur10/Documents/i3UR10/venv/bin/python /home/ur10/Documents/i3UR10/src/main.py "$@"
