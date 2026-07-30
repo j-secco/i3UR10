@@ -1,301 +1,122 @@
-# UR10 WebSocket Jog Control Interface
+# i3UR10 - UR10 Jog Control Interface
 
-A comprehensive WebSocket-based jogging control interface for Universal Robots UR10, optimized for touch-screen operation on Elo i3 devices.
+A PyQt6 touch-optimized control interface for the Universal Robots UR10, running fullscreen on an Elo i3 touchscreen. Provides Cartesian and joint jogging, choreographed demo routines, live safety monitoring, and protective-stop recovery.
 
-**Author:** jsecco ®  
-**Version:** 1.0.0  
-**License:** MIT  
+**Author:** jsecco ®
+**Version:** 2.0.0
+**License:** MIT
 
-## 🚀 Features
-
-### WebSocket Communication
-- **Primary Interface (Port 30001)**: Command execution and program control
-- **Real-time Data (Port 30003)**: High-frequency robot state monitoring
-- **Dashboard Client (Port 29999)**: Power control and safety management
+## Features
 
 ### Robot Control
-- **Cartesian Jogging**: X, Y, Z, Rx, Ry, Rz with configurable speeds
-- **Joint Jogging**: Individual joint control (J1-J6)
-- **Step & Continuous Modes**: Precise positioning or smooth continuous movement
-- **Speed Scaling**: Configurable velocity limits for safety
-- **Emergency Stop**: Immediate robot stopping with safety monitoring
+- **Cartesian jogging**: X, Y, Z, Rx, Ry, Rz with color-coded axes
+- **Joint jogging**: individual joint control (J1-J6)
+- **Step and continuous modes**: precise steps or smooth held-button motion
+- **Demo routines**: wave, bow, pendulum, juggle, plunge, reach, sorting, sprint, stacking, technical, and industrial choreographies, executed as a single looping URScript program for smooth, brake-free motion (see `SMOOTH_MOTION.md`)
+- **Emergency stop and recovery**: e-stop wiring plus a guided recovery panel for protective stops
 
-### Safety Features
-- Real-time safety status monitoring
-- Emergency stop integration
-- Robot state validation
-- Connection health monitoring
-- Automatic reconnection handling
+### Communication (four channels to the robot)
+- **Primary interface (30001)**: URScript execution
+- **RTDE (30004, optional)**: motion via ur_rtde when `use_rtde_for_motion` is enabled; more reliable stop/recovery
+- **Real-time data (30003)**: high-frequency TCP pose, joint angles, and safety state
+- **Dashboard (29999)**: power, brake release, protective-stop unlock, mode queries
 
-### User Interface
-- Touch-optimized PyQt6 interface
-- Designed for Elo i3 touchscreen devices
-- Real-time position feedback
-- Visual safety status indicators
-- Responsive button layout for industrial use
+### Safety
+- Continuous safety-mode polling with on-screen status
+- Protective stops logged with joint/TCP context to `logs/safety_events.log`
+- Audible warnings (`assets/sounds/`) and a recovery workflow in the UI
 
-## 📋 Requirements
+### User Interface (v2)
+- Fullscreen PyQt6 interface designed for the Elo i3 touchscreen
+- Tabbed pages: Jog, Demos, Runner, Settings
+- Light and dark themes, on-screen numeric keypad
+- Escape key quits (useful with a keyboard attached)
 
-### Hardware
-- Universal Robots UR10 with network connectivity
-- Elo i3 touchscreen device (or compatible Linux system)
-- Network connection to robot controller
+## Requirements
 
-### Software
-- Ubuntu 20.04+ (recommended)
-- Python 3.12+
-- Qt6 libraries (installed automatically)
+- Universal Robots UR10 (CB series) reachable over the network
+- Elo i3 touchscreen or compatible Linux system
+- Python 3.10+, Qt6
+- `ur_rtde` if RTDE motion is enabled
 
-## ⚡ Quick Installation
-
-### 1. Clone or Download
-```bash
-# If using git
-git clone <repository-url>
-cd ur10-websocket-jog-control
-
-# Or download and extract the project files
-```
-
-### 2. Run Installation Script
-```bash
-chmod +x install.sh
-./install.sh
-```
-
-The installation script will:
-- ✅ Create Python virtual environment
-- ✅ Install all required dependencies  
-- ✅ Set up project directories
-- ✅ Create run scripts and desktop launcher
-- ✅ Generate systemd service file (optional)
-
-### 3. Configure Robot Connection
-Edit the configuration file with your UR10's IP address:
+## Setup
 
 ```bash
-nano config/robot_config.yaml
+git clone git@github.com:j-secco/i3UR10.git
+cd i3UR10
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+cp config/robot_config.yaml.template config/robot_config.yaml
+# edit config/robot_config.yaml: set your robot IP and motion backend
 ```
 
-```yaml
-robot:
-  ip_address: "192.168.10.24"  # Replace with your UR10 IP
-  ports:
-    primary: 30001      # Primary interface
-    realtime: 30003     # Real-time data
-    dashboard: 29999    # Dashboard commands
-  
-jogging:
-  default_speed: 0.1    # m/s for Cartesian, rad/s for joints
-  step_size: 0.01       # Default step size
-  max_speed: 0.5        # Safety speed limit
-  
-safety:
-  enable_emergency_monitoring: true
-  connection_timeout: 5.0
-```
+## Running
 
-### 4. Run the Application
 ```bash
-# Simple run
-./run.sh
-
-# Or manually
-source venv/bin/activate
-python src/main.py
+./launch.sh                    # production entry, used by the desktop icon
+# or
+venv/bin/python launch_v2.py
 ```
 
-## 📱 Usage
+Runtime behaviour (safety polling, dashboard connection, recovery commands) is logged to `/tmp/v2_debug.log`.
 
-### Starting the Interface
-1. Ensure UR10 is powered and network-accessible
-2. Run the application using `./run.sh`
-3. The touch interface will open automatically
-4. Connection status is displayed in the top bar
+### Debugging tools (no robot motion)
 
-### Basic Jogging
-1. **Select Mode**: Choose Cartesian or Joint jogging
-2. **Choose Direction**: Select axis or joint to move
-3. **Set Speed**: Use speed slider for velocity control
-4. **Jog**: 
-   - **Step Mode**: Single click for precise steps
-   - **Continuous Mode**: Hold button for continuous movement
-
-### Safety Controls
-- **Emergency Stop**: Large red button for immediate stopping
-- **Reset**: Clear emergency states and reconnect
-- **Connection Status**: Live indicator of robot communication
-
-## 🔧 Advanced Configuration
-
-### Custom Speed Profiles
-```yaml
-speed_profiles:
-  precise:
-    cartesian: 0.05  # m/s
-    joint: 0.1       # rad/s
-  normal:
-    cartesian: 0.1
-    joint: 0.2
-  fast:
-    cartesian: 0.25
-    joint: 0.5
+```bash
+python read_state.py    # one-shot read of current robot state
+python reach_map.py     # offline reach / self-collision map for demo amplitudes
+ping <robot_ip>
+nc -zv <robot_ip> 30001
+nc -zv <robot_ip> 29999
 ```
 
-### Network Settings
-```yaml
-network:
-  connection_retries: 3
-  retry_delay: 2.0
-  keepalive_interval: 30.0
-  receive_timeout: 1.0
-```
-
-## 🛠️ Architecture
+## Project Structure
 
 ```
-ur10-websocket-jog-control/
+i3UR10/
+├── launch.sh                     # production launcher (desktop icon target)
+├── launch_v2.py                  # entry point: loads config, shows MainWindowV2
 ├── src/
 │   ├── communication/
-│   │   ├── websocket_controller.py  # Primary WebSocket client
-│   │   ├── websocket_receiver.py    # Real-time data receiver  
-│   │   └── dashboard_client.py      # Dashboard commands
+│   │   ├── websocket_controller.py   # URScript over Primary (30001)
+│   │   ├── rtde_controller.py        # optional ur_rtde motion backend (30004)
+│   │   ├── websocket_receiver.py     # realtime state (30003)
+│   │   ├── safety_event_logger.py    # protective-stop context logging
+│   │   └── dashboard_client.py       # Dashboard commands (29999)
 │   ├── control/
-│   │   └── jog_controller.py        # Main jogging logic
-│   ├── ui/                          # PyQt6 interface (to be added)
-│   └── main.py                      # Application entry point
-├── config/
-│   └── robot_config.yaml           # Robot configuration
-├── logs/                            # Application logs
-├── docs/                            # Documentation
-├── install.sh                       # Installation script
-├── uninstall.sh                     # Uninstallation script  
-├── requirements.txt                 # Python dependencies
-└── README.md                        # This file
+│   │   ├── jog_controller.py         # orchestrator
+│   │   ├── cartesian_jog.py / joint_jog.py
+│   │   ├── safety_monitor.py
+│   │   └── *_demo.py, demo_runner.py # choreographed demos
+│   └── ui/
+│       ├── main_window_v2.py         # MainWindowV2
+│       ├── theme_v2.py               # light/dark QSS
+│       ├── pages/                    # jog, demos, runner, settings
+│       └── widgets/                  # header, footer, tabs, cards, keypad, recovery
+├── config/robot_config.yaml          # local config (gitignored; template tracked)
+├── assets/                           # icons, sounds
+├── logs/                             # safety_events.log and app logs
+├── read_state.py, reach_map.py       # debugging tools
+└── SMOOTH_MOTION.md                  # motion architecture and demo authoring guide
 ```
 
-## 🔌 WebSocket Protocol Details
+## Safety Considerations
 
-### Primary Interface (Port 30001)
-Used for sending commands and receiving responses:
-```python
-# Example jogging command
-"movej([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], a=0.1, v=0.1)\n"
-```
+1. Always ensure proper safety measures when operating the robot
+2. Verify workspace clearance before jogging or running demos
+3. Keep the physical emergency stop accessible at all times
+4. Validate new demo amplitudes with `reach_map.py` before running on hardware
+5. Test at low speed before increasing velocities
+6. Never bypass safety systems or protective measures
 
-### Real-time Interface (Port 30003)  
-Provides high-frequency robot state data:
-- TCP pose (position and orientation)
-- Joint angles and velocities
-- Safety mode and robot state
-- I/O states and tool data
+## Troubleshooting
 
-### Dashboard Interface (Port 29999)
-Robot control and status queries:
-- `power on` / `power off`
-- `brake release` / `brake engage`
-- `get robot model` / `get serial number`
-- `is in remote control` / `get program state`
+- **Cannot connect**: check `ping <robot_ip>`, ports 30001/29999, and that the robot is in remote control mode
+- **Protective stop**: use the in-app recovery panel, or inspect `logs/safety_events.log` for the joint/TCP state and controller messages leading up to the stop
+- **Jerky demo motion / brake clicks**: see `SMOOTH_MOTION.md`; demos must run inside the single looping URScript program
+- **Display issues**: the app expects a running X/Wayland session on the touchscreen (`DISPLAY=:0`)
 
-## 📊 Logging and Monitoring
+## Version History
 
-All application activities are logged to:
-- `logs/ur10_jog_control.log` - General application log
-- `logs/websocket_communication.log` - WebSocket traffic
-- `logs/safety_events.log` - Safety-related events
-
-Log levels: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`
-
-## 🚨 Safety Considerations
-
-⚠️ **CRITICAL SAFETY NOTES:**
-
-1. **Always ensure proper safety measures** when operating the robot
-2. **Verify workspace clearance** before jogging movements  
-3. **Keep emergency stop accessible** at all times
-4. **Test in low-speed mode** before increasing velocities
-5. **Understand robot coordinate systems** (Base vs Tool frames)
-6. **Monitor safety status** indicators continuously
-7. **Never bypass safety systems** or protective measures
-
-## 🔧 Troubleshooting
-
-### Connection Issues
-```bash
-# Check network connectivity
-ping 192.168.10.24  # Replace with your robot IP
-
-# Verify ports are accessible
-telnet 192.168.10.24 30001
-telnet 192.168.10.24 29999
-```
-
-### Robot Not Responding
-1. Check robot power and initialization
-2. Ensure robot is in remote control mode
-3. Verify no protective stops are active
-4. Check emergency stop status
-
-### GUI Display Issues
-```bash
-# For headless systems, ensure X11 forwarding or display server
-export DISPLAY=:0
-
-# Install Qt platform plugins if missing  
-sudo apt-get install qt6-base-dev
-```
-
-### Performance Issues
-- Monitor CPU usage during operation
-- Check network latency to robot
-- Review log files for bottlenecks
-- Consider reducing real-time data frequency
-
-## 🗂️ Uninstallation
-
-To remove the application while preserving configuration and logs:
-
-```bash
-./uninstall.sh
-```
-
-For complete removal:
-```bash
-rm -rf /path/to/ur10-websocket-jog-control
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/new-feature`)
-3. Commit changes (`git commit -am 'Add new feature'`)
-4. Push to branch (`git push origin feature/new-feature`)
-5. Create Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🐛 Support
-
-For issues and questions:
-1. Check the troubleshooting section above
-2. Review log files in `logs/` directory
-3. Open an issue on the project repository
-4. Contact: jsecco ®
-
-## 🔄 Version History
-
-- **v1.0.0** (2024) - Initial release
-  - WebSocket communication layer
-  - Dashboard client implementation  
-  - Jog control logic
-  - Safety monitoring
-  - Installation/deployment scripts
-  - Touch-optimized PyQt6 interface (in progress)
-
----
-
-**⚡ Ready to control your UR10 with WebSockets!**
-
-*Built with ❤️ for industrial automation*
+- **v2.0.0** (2026) - v2 UI: tabbed pages, recovery panel, keypad, themes, demo suite, RTDE motion backend, safety event logging. v1 removed; preserved at tag `pre-cleanup-20260730`.
+- **v1.0.0** (2024) - initial WebSocket jogging interface.
