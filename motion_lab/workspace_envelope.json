@@ -1842,7 +1842,7 @@
       ]
     }
   ],
-  "note": "cart measured; reachability + self-collision + cart is the whole model",
+  "note": "cart + ground measured; reachability, self-collision and these solids are the model",
   "dome": {
     "r_max": 99.0,
     "z_ceiling": 99.0,
@@ -1918,9 +1918,9 @@
           3.0
         ]
       ],
-      "z_top": -0.435,
+      "z_top": -0.9017,
       "z_bottom": -3.0,
-      "margin": 0.02
+      "margin": 0.05
     }
   ]
 }
