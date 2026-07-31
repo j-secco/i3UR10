@@ -44,6 +44,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 from control.pose_guard import joint_origins, tcp_xyz
+from obstacles import ObstacleSet
 
 DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "workspace_envelope.json")
@@ -281,6 +282,11 @@ class Envelope:
     cartesian_tolerance_m: float = 0.01
     free_joints: List[int] = field(default_factory=list)
 
+    # Measured keep-out solids. Exact geometry beats an inferred floor:
+    # it describes the obstacle rather than where the arm happened to go,
+    # and it holds for poses nobody demonstrated.
+    obstacles: List[Dict] = field(default_factory=list)
+
     @classmethod
     def from_samples(cls, joint_samples: Sequence[Sequence[float]],
                      note: str = "") -> "Envelope":
@@ -311,6 +317,9 @@ class Envelope:
                                      f"J{i + 1} at {math.degrees(q):.1f} deg, taught "
                                      f"{math.degrees(lo_t):.1f} to {math.degrees(hi_t):.1f}",
                                      list(joints))
+        blocked = ObstacleSet.from_json(self.obstacles).blocked(joints)
+        if blocked is not None:
+            return Violation("obstacle", blocked, list(joints))
         if self.dome is None:
             return None
         for p in arm_points(joints):
@@ -382,6 +391,9 @@ class Envelope:
         lines = [f"=== taught envelope ({self.samples} poses) ==="]
         if self.note:
             lines.append(f"note: {self.note}")
+        obs = ObstacleSet.from_json(self.obstacles)
+        lines.append("\nMeasured keep-out solids (exact, checked against every link):")
+        lines.extend(obs.describe())
         if self.dome is not None:
             lines.append("\nTaught volume (this is what is enforced):")
             lines.extend(self.dome.describe())

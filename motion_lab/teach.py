@@ -46,6 +46,7 @@ import yaml  # noqa: E402
 
 from envelope import (BASE_EXCLUSION_R, DEFAULT_PATH, FLOOR_SECTORS,  # noqa: E402
                       Envelope, Zone, arm_points)
+from obstacles import ObstacleSet, Prism  # noqa: E402
 from telemetry import Recorder, read_once  # noqa: E402
 
 PRIMARY_PORT = 30001
@@ -126,6 +127,74 @@ def live_line(samples):
     return ("  J " + " ".join(f"{math.degrees(v):7.1f}" for v in q) +
             f"   tcp z {samples[-1].tcp[2]:.3f} m   {len(samples)} samples")
 
+
+
+
+def measure_obstacle(args):
+    """Measure a solid by walking the flange around its top edge.
+
+    Each press records where the flange centre is, so the footprint and the
+    top height arrive already in the robot's base frame -- no tape, no
+    transform arithmetic. The recorded point is the CENTRE of the flange, not
+    its surface, which is why a clearance margin is kept around the result.
+    """
+    env = Envelope.load_if_present(args.out)
+    if env is None:
+        raise SystemExit(f"no envelope at {args.out}; teach the workspace first")
+
+    rec = Recorder(args.host)
+    corners = []
+    with rec:
+        print(f"\n=== measuring '{args.obstacle}' ===")
+        print("Put the FLANGE CENTRE on each corner of the solid's TOP edge and press")
+        print("Enter. Go round in order -- the points become a footprint polygon, and")
+        print("their height becomes the top surface.")
+        print("  Enter  record a corner      u  undo the last one")
+        print("  d      done                 Ctrl-C  abort\n")
+        while True:
+            try:
+                line = input(f"  [{len(corners)} corners] ").strip().lower()
+            except EOFError:
+                line = "d"
+            if line == "d":
+                break
+            if line == "u":
+                if corners:
+                    print(f"    removed {corners.pop()}")
+                continue
+            smp = current_pose(rec)
+            if smp is None:
+                print("    no telemetry")
+                continue
+            pt = [round(smp.tcp[0], 4), round(smp.tcp[1], 4), round(smp.tcp[2], 4)]
+            corners.append(pt)
+            print(f"    corner {len(corners)}: x {pt[0]:+.3f}  y {pt[1]:+.3f}  z {pt[2]:+.3f}")
+
+    if len(corners) < 3:
+        raise SystemExit(f"{len(corners)} corners; a footprint needs at least 3")
+
+    polygon = [[c[0], c[1]] for c in corners]
+    z_top = max(c[2] for c in corners)
+    spread = z_top - min(c[2] for c in corners)
+    solid = Prism(name=args.obstacle, polygon=polygon, z_top=round(z_top, 4),
+                  margin=args.margin)
+
+    xs = [c[0] for c in corners]; ys = [c[1] for c in corners]
+    print(f"\n  footprint {len(polygon)} corners, "
+          f"{max(xs) - min(xs):.3f} x {max(ys) - min(ys):.3f} m")
+    print(f"  top surface {z_top:+.3f} m, corners varied by {spread * 1000:.0f} mm")
+    if spread > 0.03:
+        print("  (they should all be on the same top surface -- check the outliers)")
+    print(f"  clearance kept: {args.margin * 1000:.0f} mm around it, plus each link's "
+          f"own radius")
+
+    env.obstacles = [o for o in env.obstacles if o.get("name") != solid.name]
+    env.obstacles.append({"name": solid.name, "polygon": solid.polygon,
+                          "z_top": solid.z_top, "z_bottom": solid.z_bottom,
+                          "margin": solid.margin})
+    env.save(args.out)
+    print("\n" + "\n".join(ObstacleSet.from_json(env.obstacles).describe()))
+    print(f"\nsaved to {args.out}")
 
 
 def teach_zone(args):
@@ -239,6 +308,11 @@ def main():
     ap.add_argument("--from-marks", action="store_true",
                     help="build the envelope from marked poses only, ignoring "
                          "the motion between them (implied by --guided)")
+    ap.add_argument("--obstacle", default=None, metavar="NAME",
+                    help="measure a solid by touching round its top edge: the "
+                         "footprint and height go straight into the base frame")
+    ap.add_argument("--margin", type=float, default=0.05,
+                    help="clearance kept around a measured solid (default 0.05 m)")
     ap.add_argument("--zone", default=None, metavar="NAME",
                     help="teach one bearing sector's limit into an existing "
                          "envelope: hold the arm at the lowest safe pose, then "
@@ -267,6 +341,11 @@ def main():
         raise SystemExit("power on and release brakes before teaching")
     if read_once(args.host) is None:
         raise SystemExit("no telemetry; is another client holding port 30003?")
+
+    if args.obstacle:
+        print("\nRead-only: hold the pendant Freedrive button to move the arm.")
+        measure_obstacle(args)
+        return
 
     if args.zone:
         print("\nRead-only: hold the pendant Freedrive button to move the arm.")
