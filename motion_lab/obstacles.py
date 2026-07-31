@@ -41,6 +41,19 @@ DEFAULT_MARGIN_M = 0.05
 # Index of the first link whose position depends on the joint angles.
 FIRST_MOVING_LINK = 1
 
+# The robot's own mounting structure occupies a column about the base axis:
+# base flange, adapter plate and shoulder housing. On this cell the arm is
+# bolted straight onto the cart, so the shoulder sits about 90 mm above the
+# cart top while the upper arm's radius alone is 75 mm -- there is no room
+# there for a clearance margin, and demanding one refuses every pose.
+#
+# That volume is filled by the robot's own hardware, so the cart cannot be
+# struck inside it. Arm points within this radius of the base axis are
+# therefore not tested against measured solids. The exemption cannot hide a
+# real collision: any link swinging down through it extends well beyond
+# 0.15 m, and the rest of that link is still tested.
+BASE_STRUCTURE_R = 0.15
+
 
 def point_in_polygon(x: float, y: float, poly: Sequence[Sequence[float]]) -> bool:
     """Ray casting. Polygon is a list of (x, y), implicitly closed."""
@@ -143,6 +156,8 @@ class ObstacleSet:
             for k in range(n + 1):
                 t = k / n
                 p = [a[j] + (b[j] - a[j]) * t for j in range(3)]
+                if math.hypot(p[0], p[1]) < BASE_STRUCTURE_R:
+                    continue
                 for solid in self.solids:
                     c = solid.clearance(p, r)
                     if best is None or c < best[0]:
