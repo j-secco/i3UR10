@@ -36,24 +36,27 @@
     border: 1px solid var(--line); border-radius: 10px;
     backdrop-filter: blur(8px);
   }
-  #controls { top: 14px; left: 14px; width: 310px; padding: 14px; }
-  #readout  { bottom: 14px; left: 14px; width: 310px; padding: 12px 14px; }
-  #hint     { top: 14px; right: 14px; width: 260px; padding: 12px 14px;
-              color: var(--ink-dim); font-size: 12px; line-height: 1.5; }
+  /* Four type sizes, deliberately far apart: this is read from across the
+     cell while the arm is moving, not from reading distance.
+     11 caption · 13 data · 16 heading · 28 the one measured number. */
+  #controls { top: 14px; left: 14px; width: 332px; padding: 16px; }
+  #readout  { bottom: 14px; left: 14px; width: 332px; padding: 13px 16px; }
+  #hint     { top: 14px; right: 14px; width: 268px; padding: 13px 15px;
+              color: var(--ink-dim); font-size: 13px; line-height: 1.5; }
 
-  h1 { font-size: 13px; margin: 0 0 2px; letter-spacing: .09em;
+  h1 { font-size: 16px; margin: 0 0 3px; letter-spacing: .1em;
        text-transform: uppercase; color: var(--ink); }
-  .sub { font-size: 11px; color: var(--ink-faint); margin-bottom: 12px; }
+  .sub { font-size: 11px; color: var(--ink-faint); margin-bottom: 13px; }
 
   .row { display: flex; align-items: baseline; justify-content: space-between;
-         gap: 10px; padding: 3px 0; font-size: 12px; }
+         gap: 10px; padding: 3px 0; font-size: 13px; }
   .row .k { color: var(--ink-dim); }
   .row .v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
   .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
              margin-top: 12px; }
   button {
-    font: 600 12px/1 var(--sans); color: var(--ink); cursor: pointer;
+    font: 600 13px/1 var(--sans); color: var(--ink); cursor: pointer;
     background: #1e2530; border: 1px solid var(--line); border-radius: 7px;
     padding: 10px 8px;
   }
@@ -63,29 +66,31 @@
   #go   { grid-column: 1 / -1; background: #2b4c36; border-color: #3c6b4b; }
   #go:hover:not(:disabled) { background: #35603f; }
   #stop { grid-column: 1 / -1; background: #4a2320; border-color: #7a3a35;
-          color: #ffd9d6; padding: 13px; font-size: 13px; letter-spacing: .06em; }
+          color: #ffd9d6; padding: 14px; font-size: 16px; letter-spacing: .08em; }
   #stop:hover { background: #5d2c28; }
 
-  label.slider { display: block; margin-top: 14px; font-size: 12px;
+  label.slider { display: block; margin-top: 14px; font-size: 13px;
                  color: var(--ink-dim); }
   label.slider b { color: var(--ink); font-family: var(--mono); float: right; }
   input[type=range] { width: 100%; margin-top: 6px; accent-color: var(--accent); }
 
-  .pill { display: inline-block; padding: 2px 7px; border-radius: 99px;
-          font: 600 10px/1.6 var(--sans); letter-spacing: .06em;
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 99px;
+          font: 600 11px/1.6 var(--sans); letter-spacing: .07em;
           text-transform: uppercase; }
   .pill.ok   { background: #17351f; color: var(--good); }
   .pill.warn { background: #3a2d10; color: var(--warn); }
   .pill.bad  { background: #3a1a1a; color: var(--bad); }
 
-  #status { font-size: 12px; min-height: 34px; line-height: 1.45; }
+  #status { font-size: 13px; min-height: 36px; line-height: 1.45; }
   #status .why { color: var(--ink-dim); font-size: 11px; display: block;
-                 margin-top: 3px; }
+                 margin-top: 4px; }
   .divider { height: 1px; background: var(--line); margin: 12px 0; }
+  /* The only measured number on the page, so it gets to be the largest. */
   .measure { font-family: var(--mono); font-variant-numeric: tabular-nums;
-             font-size: 20px; letter-spacing: -.02em; }
-  .measure small { font-size: 11px; color: var(--ink-faint);
-                   font-family: var(--sans); letter-spacing: 0; }
+             font-size: 28px; letter-spacing: -.02em; line-height: 1.1; }
+  .measure small { font-size: 11px; color: var(--ink-faint); display: block;
+                   font-family: var(--sans); letter-spacing: .04em;
+                   text-transform: uppercase; margin-top: 4px; }
 </style>
 </head>
 <body>
