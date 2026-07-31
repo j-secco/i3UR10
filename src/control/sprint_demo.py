@@ -18,8 +18,8 @@ from typing import List, Optional, Callable, Any
 # ---------------------------------------------------------------------------
 # Safety caps — never exceed these values.
 # ---------------------------------------------------------------------------
-MAX_JOINT_SPEED_RAD_S   =  2.0
-MAX_JOINT_ACCEL_RAD_S2  =  3.5
+MAX_JOINT_SPEED_RAD_S   =  2.5
+MAX_JOINT_ACCEL_RAD_S2  =  5.5
 MAX_DELTA_FROM_HOME_RAD = 0.9
 
 
@@ -130,11 +130,24 @@ class SprintDemo:
         DJ2_UP = -0.30   # J2 towards shoulder-up
         DJ3_FW =  0.20   # J3 fold forward → TCP high
 
-        # Sprint speed/accel: full-capability showcase. The J1/J2 hardware
-        # limit is 2.09 rad/s (120 deg/s); 1.80 rad/s is 86% of that, and
-        # the module caps (2.0 / 3.5) remain the hard ceiling.
-        V_SPRINT = 1.80   # rad/s
-        A_SPRINT = 3.00   # rad/s^2
+        # Sprint speed/accel, chosen by measurement (motion_lab exp03,
+        # 2026-07-31) rather than by feel.
+        #
+        # The sweep legs are 1.10 rad, and a joint accelerating at `a` over a
+        # leg of `d` can only reach sqrt(a*d) before it must brake for the
+        # corner. At the previous a=3.00 that was sqrt(3.3)=1.82 rad/s against
+        # a commanded 1.80: no margin, so the arm never approached the speed it
+        # was told and raising V alone achieved nothing. Acceleration was the
+        # binding constraint, not velocity.
+        #
+        # Measured peak joint speed on the robot:
+        #   a=3.00 v=1.80 -> 1.66 rad/s     a=4.50 v=2.20 -> 2.02 rad/s
+        #   a=4.00 v=1.80 -> 1.83 rad/s     a=5.25 v=2.40 -> 2.14 rad/s (89% tracking)
+        # 2.02 rad/s is 97% of J1's 2.09 rad/s hardware limit, reached with
+        # clean tracking and no stalls. Past that we command far more than the
+        # arm can deliver, distorting trajectory timing for ~6% more speed.
+        V_SPRINT = 2.20   # rad/s
+        A_SPRINT = 4.50   # rad/s^2
 
         # Setup / lower / home speeds
         V_SETUP  = 0.50
