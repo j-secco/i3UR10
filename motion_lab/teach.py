@@ -203,7 +203,9 @@ def teach_zone(args):
           f"(+{args.clearance:.3f} m clearance applied)")
     for k in sorted(kept, key=int):
         base = env.dome.sector_floors[int(k)]
-        arrow = "raises" if kept[k] > base else "no change (bin is tighter)"
+        d = kept[k] - base
+        arrow = ("raises" if d > 0.005 else "lowers" if d < -0.005 else "matches") + \
+                f" the inferred bin by {abs(d):.3f} m" if abs(d) > 0.005 else "matches the bin"
         print(f"    {int(k) * step:>3}-{(int(k) + 1) * step:<3} deg  "
               f"{kept[k]:+.3f} m   bin {base:+.3f} m   {arrow}")
     if thin:

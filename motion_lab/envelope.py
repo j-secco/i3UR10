@@ -48,7 +48,11 @@ from control.pose_guard import joint_origins, tcp_xyz
 DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "workspace_envelope.json")
 
-FLOOR_SECTORS = 12          # 30 degrees each
+# 15 degrees each. The floor within a sector is the lowest the arm reached
+# anywhere in it, so a sector straddling the edge of an obstacle takes the
+# open-side value and would allow the arm down on the tight side too. The
+# resolution has to be finer than the features it is meant to describe.
+FLOOR_SECTORS = 24
 SAMPLES_PER_LINK = 6        # points sampled along each link when testing the arm
 
 # Inside this horizontal distance of the base axis the arm is structurally
@@ -160,12 +164,21 @@ class Dome:
         return cls(r_max=r_max, z_ceiling=z_ceiling, sector_floors=floors)
 
     def floor_at(self, x: float, y: float) -> float:
-        floor = self.sector_floors[self._sector(x, y)] if self.sector_floors else -math.inf
-        for z in self.zones:
-            zf = z.floor_at(x, y)
-            if zf is not None:
-                floor = max(floor, zf)
-        return floor
+        """Zone floors are AUTHORITATIVE in the sectors they cover.
+
+        They are not merely combined with the inferred bins, because they are
+        better data: a zone is a slow deliberate sweep along the obstacle with
+        a dwell requirement, where a bin is whatever the arm happened to do
+        while passing through. At 15-degree resolution a bin backed by a
+        handful of poses is easily too high by a few centimetres, and a
+        tighten-only rule would make that unfixable -- no amount of careful
+        re-teaching could ever bring it back down.
+        """
+        zoned = [z.floor_at(x, y) for z in self.zones]
+        zoned = [f for f in zoned if f is not None]
+        if zoned:
+            return max(zoned)          # overlapping zones: the tighter wins
+        return self.sector_floors[self._sector(x, y)] if self.sector_floors else -math.inf
 
     def reach_at(self, x: float, y: float) -> float:
         r = self.r_max

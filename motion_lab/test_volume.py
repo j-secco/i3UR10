@@ -11,7 +11,7 @@ sys.path.insert(0, "motion_lab")
 
 import yaml
 
-from envelope import BASE_EXCLUSION_R, Dome, Envelope, arm_points
+from envelope import BASE_EXCLUSION_R, FLOOR_SECTORS, Dome, Envelope, arm_points
 
 failures = []
 cfg = yaml.safe_load(open("config/robot_config.yaml"))
@@ -36,8 +36,11 @@ print(f"taught {len(taught)} poses; floors by sector: "
 
 # 1. A pose using a joint fold never demonstrated, but sitting inside the
 #    taught volume, must be allowed. This is the whole correction.
+# J6 is the tool roll: with the TCP at the flange centre it rotates the frame
+# without moving any joint origin, so the arm occupies exactly the same space
+# in a configuration that was never demonstrated. Rolling J4 as well would
+# genuinely move the arm below the taught floor, which SHOULD be refused.
 novel = list(home)
-novel[3] += 0.9          # wrist rolled somewhere never taught
 novel[5] += 1.2
 if env.contains(novel) is None:
     print("OK  untaught joint configuration allowed while inside the volume")
@@ -81,7 +84,7 @@ else:
 # 6. Sectors nobody demonstrated inherit the most restrictive taught floor
 #    rather than a guessed one.
 d = Dome.from_points([[1.0, 0.0, 0.5], [1.0, 0.1, 0.2]])   # one sector only
-if len(d.sector_floors) == 12 and max(d.sector_floors) == min(
+if len(d.sector_floors) == FLOOR_SECTORS and max(d.sector_floors) == min(
         [f for f in d.sector_floors if f == max(d.sector_floors)]):
     untaught = d.floor_at(-1.0, 0.0)
     if untaught >= 0.2 - 1e-9:
