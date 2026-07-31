@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UR10 pointer</title>
+<style>
+  /* Deliberately one theme: this is an instrument panel that lives on a
+     screen next to a robot cell, not a document. */
+  :root {
+    --ink:        #e8ecf2;
+    --ink-dim:    #8d97a6;
+    --ink-faint:  #5b6472;
+    --ground:     #0e1116;
+    --panel:      #161a21;
+    --line:       #262c36;
+    --accent:     #ffb03a;   /* the target, and only the target */
+    --arm:        #63b3ff;
+    --ghost:      #ffb03a;
+    --good:       #57c98a;
+    --warn:       #e8b13a;
+    --bad:        #ef6461;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--ground); color: var(--ink);
+    font-family: var(--sans); overflow: hidden;
+  }
+  #view { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+
+  .panel {
+    position: absolute; background: color-mix(in srgb, var(--panel) 92%, transparent);
+    border: 1px solid var(--line); border-radius: 10px;
+    backdrop-filter: blur(8px);
+  }
+  #controls { top: 14px; left: 14px; width: 310px; padding: 14px; }
+  #readout  { bottom: 14px; left: 14px; width: 310px; padding: 12px 14px; }
+  #hint     { top: 14px; right: 14px; width: 260px; padding: 12px 14px;
+              color: var(--ink-dim); font-size: 12px; line-height: 1.5; }
+
+  h1 { font-size: 13px; margin: 0 0 2px; letter-spacing: .09em;
+       text-transform: uppercase; color: var(--ink); }
+  .sub { font-size: 11px; color: var(--ink-faint); margin-bottom: 12px; }
+
+  .row { display: flex; align-items: baseline; justify-content: space-between;
+         gap: 10px; padding: 3px 0; font-size: 12px; }
+  .row .k { color: var(--ink-dim); }
+  .row .v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+             margin-top: 12px; }
+  button {
+    font: 600 12px/1 var(--sans); color: var(--ink); cursor: pointer;
+    background: #1e2530; border: 1px solid var(--line); border-radius: 7px;
+    padding: 10px 8px;
+  }
+  button:hover:not(:disabled) { background: #27303e; border-color: #3a4453; }
+  button:disabled { opacity: .38; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #go   { grid-column: 1 / -1; background: #2b4c36; border-color: #3c6b4b; }
+  #go:hover:not(:disabled) { background: #35603f; }
+  #stop { grid-column: 1 / -1; background: #4a2320; border-color: #7a3a35;
+          color: #ffd9d6; padding: 13px; font-size: 13px; letter-spacing: .06em; }
+  #stop:hover { background: #5d2c28; }
+
+  label.slider { display: block; margin-top: 14px; font-size: 12px;
+                 color: var(--ink-dim); }
+  label.slider b { color: var(--ink); font-family: var(--mono); float: right; }
+  input[type=range] { width: 100%; margin-top: 6px; accent-color: var(--accent); }
+
+  .pill { display: inline-block; padding: 2px 7px; border-radius: 99px;
+          font: 600 10px/1.6 var(--sans); letter-spacing: .06em;
+          text-transform: uppercase; }
+  .pill.ok   { background: #17351f; color: var(--good); }
+  .pill.warn { background: #3a2d10; color: var(--warn); }
+  .pill.bad  { background: #3a1a1a; color: var(--bad); }
+
+  #status { font-size: 12px; min-height: 34px; line-height: 1.45; }
+  #status .why { color: var(--ink-dim); font-size: 11px; display: block;
+                 margin-top: 3px; }
+  .divider { height: 1px; background: var(--line); margin: 12px 0; }
+  .measure { font-family: var(--mono); font-variant-numeric: tabular-nums;
+             font-size: 20px; letter-spacing: -.02em; }
+  .measure small { font-size: 11px; color: var(--ink-faint);
+                   font-family: var(--sans); letter-spacing: 0; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div class="panel" id="controls">
+  <h1>UR10 pointer</h1>
+  <div class="sub" id="modeline">connecting…</div>
+
+  <div class="row"><span class="k">robot</span><span class="v" id="mode">–</span></div>
+  <div class="row"><span class="k">tool now</span><span class="v" id="tcpnow">–</span></div>
+  <div class="row"><span class="k">nearest solid</span><span class="v" id="clr">–</span></div>
+
+  <label class="slider">working height <b id="hval">0.30 m</b>
+    <input type="range" id="height" min="-0.60" max="1.20" step="0.01" value="0.30">
+  </label>
+
+  <div class="divider"></div>
+  <div id="status">Click a point on the working plane.</div>
+
+  <div class="buttons">
+    <button id="go" disabled>Go to point</button>
+    <button id="home">Home</button>
+    <button id="sethome">Set home here</button>
+    <button id="stop">STOP</button>
+  </div>
+</div>
+
+<div class="panel" id="readout">
+  <div class="row"><span class="k">target</span><span class="v" id="tgt">–</span></div>
+  <div class="row"><span class="k">robot reached</span><span class="v" id="rch">–</span></div>
+  <div class="divider" style="margin:8px 0"></div>
+  <div class="measure" id="err">– <small>model vs robot</small></div>
+</div>
+
+<div class="panel" id="hint">
+  <b style="color:var(--ink)">Drag</b> to orbit, <b style="color:var(--ink)">wheel</b>
+  to zoom. Click anywhere on the grey working plane to aim the tool there;
+  the amber arm is where it would go. Nothing moves until you press Go.
+</div>
+
+<script>
+"use strict";
+const canvas = document.getElementById("view");
+const ctx = canvas.getContext("2d");
+
+let scene = null, state = null, plan = null, target = null;
+let cam = { az: -0.7, el: 0.34, r: 2.35, cx: 0.05, cy: -0.1, cz: 0.34 };
+let planeZ = 0.30;
+
+/* ---------------------------------------------------------------- camera */
+function basis() {
+  const ce = Math.cos(cam.el), se = Math.sin(cam.el);
+  const ca = Math.cos(cam.az), sa = Math.sin(cam.az);
+  const eye = [cam.cx + cam.r*ce*ca, cam.cy + cam.r*ce*sa, cam.cz + cam.r*se];
+  const f = norm([cam.cx-eye[0], cam.cy-eye[1], cam.cz-eye[2]]);
+  const right = norm(cross(f, [0,0,1]));
+  const up = cross(right, f);
+  return { eye, f, right, up };
+}
+function cross(a,b){return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function norm(a){const l=Math.hypot(...a)||1;return [a[0]/l,a[1]/l,a[2]/l];}
+
+let B = basis(), scale = 900;
+function project(p) {
+  const v = sub(p, B.eye);
+  const z = dot(v, B.f);
+  if (z <= 0.05) return null;
+  return { x: canvas.width/2 + scale*dot(v,B.right)/z,
+           y: canvas.height/2 - scale*dot(v,B.up)/z, z };
+}
+/* Screen pixel -> point on the horizontal working plane. */
+function unproject(sx, sy, z0) {
+  const dir = norm([
+    B.f[0] + (sx-canvas.width/2)/scale*B.right[0] - (sy-canvas.height/2)/scale*B.up[0],
+    B.f[1] + (sx-canvas.width/2)/scale*B.right[1] - (sy-canvas.height/2)/scale*B.up[1],
+    B.f[2] + (sx-canvas.width/2)/scale*B.right[2] - (sy-canvas.height/2)/scale*B.up[2],
+  ]);
+  if (Math.abs(dir[2]) < 1e-6) return null;
+  const t = (z0 - B.eye[2]) / dir[2];
+  if (t <= 0) return null;
+  return [B.eye[0]+t*dir[0], B.eye[1]+t*dir[1], z0];
+}
+
+/* ---------------------------------------------------------------- drawing */
+const bag = [];                                  // depth-sorted primitives
+function push(depth, fn) { bag.push({ depth, fn }); }
+function depthOf(pts) {
+  let d = 0; for (const p of pts) d += Math.hypot(...sub(p, B.eye));
+  return d / pts.length;
+}
+function poly(pts3, fill, stroke, width) {
+  const s = pts3.map(project);
+  if (s.some(p => !p)) return;
+  push(depthOf(pts3), () => {
+    ctx.beginPath();
+    s.forEach((p,i) => i ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y));
+    ctx.closePath();
+    if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = width||1; ctx.stroke(); }
+  });
+}
+function line(a, b, color, width, dash) {
+  const p = project(a), q = project(b);
+  if (!p || !q) return;
+  push(depthOf([a,b]), () => {
+    ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(q.x,q.y);
+    ctx.strokeStyle = color; ctx.lineWidth = width||1;
+    ctx.setLineDash(dash||[]); ctx.stroke(); ctx.setLineDash([]);
+  });
+}
+function dot3(p, color, r) {
+  const s = project(p); if (!s) return;
+  push(Math.hypot(...sub(p, B.eye)) - 0.001, () => {
+    ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, 7); ctx.fillStyle = color; ctx.fill();
+  });
+}
+
+function floorZ() {
+  if (!scene) return -0.9;
+  for (const s of scene.solids) {
+    const xs = s.polygon.map(p=>p[0]), ys = s.polygon.map(p=>p[1]);
+    if (Math.max(Math.max(...xs)-Math.min(...xs),
+                 Math.max(...ys)-Math.min(...ys)) > 3.0) return s.z_top;
+  }
+  return -0.9;
+}
+
+function drawSolid(sol) {
+  const xs = sol.polygon.map(p=>p[0]), ys = sol.polygon.map(p=>p[1]);
+  const span = Math.max(Math.max(...xs)-Math.min(...xs), Math.max(...ys)-Math.min(...ys));
+  if (span > 3.0) {                       // the floor: a grid reads better than a slab
+    const z = sol.z_top;
+    for (let i = -6; i <= 6; i++) {
+      line([i*0.25,-1.5,z], [i*0.25,1.5,z], "#1b2029", 1);
+      line([-1.5,i*0.25,z], [1.5,i*0.25,z], "#1b2029", 1);
+    }
+    return;
+  }
+  // Stand the solid on the measured floor rather than running it off below.
+  const top = sol.z_top, bot = floorZ();
+  const P = sol.polygon;
+  for (let i = 0; i < P.length; i++) {    // sides
+    const a = P[i], b = P[(i+1)%P.length];
+    poly([[a[0],a[1],bot],[b[0],b[1],bot],[b[0],b[1],top],[a[0],a[1],top]],
+         "rgba(90,104,126,0.16)", "rgba(140,158,186,0.26)", 1);
+  }
+  poly(P.map(p=>[p[0],p[1],top]), "rgba(112,128,152,0.42)",
+       "rgba(170,190,220,0.75)", 1.4);
+}
+
+/* The arm is drawn at its real thickness, not as a centreline. The whole
+   clearance model is capsule-based -- the upper arm is 75 mm in radius -- so a
+   hairline drawing would make gaps look far larger than they are, which is
+   exactly the misreading this tool exists to prevent. */
+function drawArm(origins, color, radii, tipColor) {
+  for (let i = 0; i < origins.length-1; i++) {
+    const a = origins[i], b = origins[i+1];
+    const p = project(a), q = project(b);
+    if (!p || !q) continue;
+    const r = (radii && radii[i] !== undefined ? radii[i] : 0.05);
+    const w = Math.max(2, 2*r*scale/((p.z+q.z)/2));
+    push(depthOf([a,b]), () => {
+      ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(q.x,q.y);
+      ctx.strokeStyle = color; ctx.lineWidth = w;
+      ctx.lineCap = "round"; ctx.stroke(); ctx.lineCap = "butt";
+    });
+  }
+  dot3(origins[origins.length-1], tipColor || "#fff", 5);
+}
+
+/* The working plane is what you click, so it has to read as a surface. It is
+   drawn only out to the arm's reach at this height: clicking past that edge
+   can never work, and showing the edge is cheaper than explaining it. */
+function drawPlane() {
+  const z = planeZ;
+  const dz = z - 0.1273, rr = 1.30*1.30 - dz*dz;
+  if (rr <= 0) return;                    // above the top or below the bottom
+  const rad = Math.sqrt(rr);
+  const disc = [];
+  for (let a = 0; a < 72; a++)
+    disc.push([rad*Math.cos(a/72*6.2832), rad*Math.sin(a/72*6.2832), z]);
+  poly(disc, "rgba(126,142,170,0.07)", "rgba(120,160,220,0.45)", 1.5);
+  for (let i = -6; i <= 6; i++) {
+    const t = i*0.2;
+    const h = Math.sqrt(Math.max(0, rad*rad - t*t));
+    if (h < 0.01) continue;
+    line([t,-h,z], [t,h,z], "rgba(140,158,190,0.20)", 1);
+    line([-h,t,z], [h,t,z], "rgba(140,158,190,0.20)", 1);
+  }
+  // Tie the plane to the base so its height is readable in the scene.
+  line([0,0,floorZ()], [0,0,z], "rgba(120,160,220,0.30)", 1, [3,4]);
+}
+
+function render() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = innerWidth*dpr; canvas.height = innerHeight*dpr;
+  canvas.style.width = innerWidth+"px"; canvas.style.height = innerHeight+"px";
+  scale = 0.62*canvas.height;
+  B = basis();
+  bag.length = 0;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  if (scene) {
+    for (const s of scene.solids) drawSolid(s);
+    drawPlane();
+    // base axis, so the robot's own column is visible
+    line([0,0,-0.02],[0,0,0.13], "#3c4655", 6);
+  }
+  const radii = scene ? scene.link_radii : null;
+  if (plan && plan.ok) drawArm(plan.origins, "rgba(255,176,58,0.55)", radii, "#ffb03a");
+  if (state && state.origins) drawArm(state.origins, "rgba(99,179,255,0.90)", radii);
+  if (target) {
+    const [x,y,z] = target;
+    line([x-0.08,y,z],[x+0.08,y,z], "#ffb03a", 2);
+    line([x,y-0.08,z],[x,y+0.08,z], "#ffb03a", 2);
+    dot3([x,y,z], "#ffb03a", 4);
+    line([x,y,z], [x,y,planeZ-0.0001], "rgba(255,176,58,0.35)", 1, [3,3]);
+  }
+  bag.sort((a,b) => b.depth - a.depth).forEach(o => o.fn());
+  requestAnimationFrame(render);
+}
+
+/* ------------------------------------------------------------ interaction */
+let drag = null;
+canvas.addEventListener("pointerdown", e => {
+  drag = { x: e.clientX, y: e.clientY, moved: 0 };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const dx = e.clientX-drag.x, dy = e.clientY-drag.y;
+  drag.moved += Math.abs(dx)+Math.abs(dy);
+  cam.az -= dx*0.006;
+  cam.el = Math.max(-0.25, Math.min(1.45, cam.el + dy*0.005));
+  drag.x = e.clientX; drag.y = e.clientY;
+});
+canvas.addEventListener("pointerup", e => {
+  const wasDrag = drag && drag.moved > 6;
+  drag = null;
+  if (wasDrag) return;
+  const dpr = window.devicePixelRatio || 1;
+  const p = unproject(e.clientX*dpr, e.clientY*dpr, planeZ);
+  if (p) aim(p);
+});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  cam.r = Math.max(0.9, Math.min(7, cam.r * (1 + Math.sign(e.deltaY)*0.09)));
+}, { passive: false });
+
+const $ = id => document.getElementById(id);
+$("height").addEventListener("input", e => {
+  planeZ = parseFloat(e.target.value);
+  $("hval").textContent = planeZ.toFixed(2)+" m";
+});
+
+const fmt = p => p ? `${p[0]>=0?"+":""}${p[0].toFixed(3)}, ${p[1]>=0?"+":""}${p[1].toFixed(3)}, ${p[2]>=0?"+":""}${p[2].toFixed(3)}` : "–";
+
+async function post(path, body) {
+  const r = await fetch(path, { method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify(body||{}) });
+  return r.json();
+}
+
+async function aim(p) {
+  target = p;
+  $("tgt").textContent = fmt(p);
+  $("status").innerHTML = "solving…";
+  $("go").disabled = true;
+  plan = await post("/plan", { x:p[0], y:p[1], z:p[2] });
+  if (plan.ok) {
+    const c = plan.clearance;
+    const mm = c ? c.m*1000 : null;
+    const cls = mm === null ? "ok" : mm < 30 ? "bad" : mm < 80 ? "warn" : "ok";
+    // A reachable point can still need a wide swing to get to. Say so before
+    // the arm does it: the amber ghost shows where it ENDS, not the route.
+    const deg = plan.travel_rad*57.3;
+    const wide = deg > 180
+      ? `<br><span style="color:var(--warn)">wide move — the arm swings a long
+         way round to get there. Watch the whole path, not the end point.</span>`
+      : "";
+    $("status").innerHTML =
+      `<span class="pill ${cls}">reachable</span> ` +
+      (mm === null ? "" : `${mm.toFixed(0)} mm from the ${c.solid}`) +
+      `<span class="why">${deg.toFixed(0)}° of total joint travel` +
+      (plan.considered > 1 ? ` · best of ${plan.considered} arm configurations` : "") +
+      wide + `</span>`;
+    $("go").disabled = !(scene && scene.motion_enabled);
+  } else {
+    $("status").innerHTML = `<span class="pill bad">refused</span> ${plan.reason}` +
+      (plan.rejected && plan.rejected.length
+        ? `<span class="why">${plan.rejected.slice(0,3).join("<br>")}</span>` : "");
+    $("go").disabled = true;
+  }
+}
+
+$("go").onclick = async () => {
+  if (!target) return;
+  $("go").disabled = true;
+  $("status").innerHTML = "moving…";
+  const r = await post("/go", { x:target[0], y:target[1], z:target[2] });
+  if (!r.ok) $("status").innerHTML = `<span class="pill bad">refused</span> ${r.reason}`;
+};
+$("home").onclick = async () => {
+  const r = await post("/home");
+  if (!r.ok) $("status").innerHTML = `<span class="pill bad">refused</span> ${r.reason}`;
+};
+$("sethome").onclick = async () => {
+  const r = await post("/sethome");
+  $("status").innerHTML = r.ok
+    ? `<span class="pill ok">home set</span><span class="why">${r.note}</span>`
+    : `<span class="pill bad">failed</span> ${r.reason}`;
+};
+$("stop").onclick = async () => {
+  await post("/stop");
+  $("status").innerHTML = `<span class="pill warn">stopped</span>`;
+};
+
+/* --------------------------------------------------------------- polling */
+async function poll() {
+  try {
+    state = await (await fetch("/state")).json();
+    if (!state.online) {
+      $("mode").textContent = "offline";
+      $("modeline").textContent = "no telemetry from the robot";
+    } else {
+      $("mode").innerHTML = state.normal
+        ? `<span class="pill ok">${state.moving ? "moving" : "ready"}</span>`
+        : `<span class="pill bad">mode ${state.robot_mode.toFixed(0)} / safety ${state.safety_mode.toFixed(0)}</span>`;
+      $("tcpnow").textContent = fmt(state.tcp);
+      const c = state.clearance;
+      if (c) {
+        const mm = c.m*1000;
+        $("clr").innerHTML = `<span style="color:${mm<30?'var(--bad)':mm<80?'var(--warn)':'var(--good)'}">`+
+          `${mm.toFixed(0)} mm</span> <span style="color:var(--ink-faint)">${c.solid}</span>`;
+      }
+      $("modeline").textContent = state.motion_enabled
+        ? "motion enabled" : "plan only — server started without --confirm";
+      if (state.last_move) {
+        const m = state.last_move;
+        $("rch").textContent = fmt(m.reached);
+        $("err").innerHTML = `${m.error_mm.toFixed(1)} mm <small>model vs robot</small>`;
+      }
+      if (state.error) $("status").innerHTML =
+        `<span class="pill bad">error</span> ${state.error}`;
+    }
+  } catch (e) { $("modeline").textContent = "server unreachable"; }
+  setTimeout(poll, 140);
+}
+
+(async () => {
+  scene = await (await fetch("/scene")).json();
+  if (!scene.motion_enabled) $("go").title = "server started without --confirm";
+  poll(); render();
+})();
+</script>
+</body>
+</html>
