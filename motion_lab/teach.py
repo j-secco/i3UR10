@@ -44,7 +44,8 @@ sys.path.insert(0, HERE)
 
 import yaml  # noqa: E402
 
-from envelope import DEFAULT_PATH, Envelope  # noqa: E402
+from envelope import (BASE_EXCLUSION_R, DEFAULT_PATH, Envelope, Zone,  # noqa: E402
+                      _wrap, arm_points)
 from telemetry import Recorder, read_once  # noqa: E402
 
 PRIMARY_PORT = 30001
@@ -126,6 +127,72 @@ def live_line(samples):
             f"   tcp z {samples[-1].tcp[2]:.3f} m   {len(samples)} samples")
 
 
+
+def teach_zone(args):
+    """Teach one sector's real limit and merge it into the saved envelope.
+
+    Two steps, because a zone is two facts: how low the arm may go there, and
+    over what arc that applies. The floor comes from a pose the operator holds
+    deliberately; the arc comes from sweeping the base through the region.
+    """
+    env = Envelope.load_if_present(args.out)
+    if env is None or env.dome is None:
+        raise SystemExit(f"no envelope at {args.out} to add a zone to; teach one first")
+
+    rec = Recorder(args.host)
+    with rec:
+        print(f"\n=== teaching zone '{args.zone}' ===")
+        print("Step 1 of 2. Hold the arm at the LOWEST pose that still clears")
+        print("the obstacle in this sector, then press Enter.")
+        try:
+            input("  ready... ")
+        except EOFError:
+            raise SystemExit("aborted")
+        pose = current_pose(rec)
+        if pose is None:
+            raise SystemExit("no telemetry")
+        low_pts = [p for p in arm_points(pose.q)
+                   if math.hypot(p[0], p[1]) > BASE_EXCLUSION_R]
+        floor = min(p[2] for p in low_pts) + args.clearance
+        print(f"  lowest part of the arm: {min(p[2] for p in low_pts):+.3f} m")
+        print(f"  zone floor set to {floor:+.3f} m (includes {args.clearance:.3f} m clearance)")
+
+        print("\nStep 2 of 2. Now sweep the arm through the arc this limit covers,")
+        print("then press Enter. Height does not matter here, only bearing.")
+        start = len(rec.trace.samples)
+        try:
+            input("  sweeping... ")
+        except EOFError:
+            pass
+        swept = rec.trace.samples[start:]
+        if len(swept) < 20:
+            raise SystemExit("almost nothing recorded during the sweep; try again")
+
+    bearings = [math.atan2(s.tcp[1], s.tcp[0]) for s in swept]
+    cx = sum(math.cos(b) for b in bearings) / len(bearings)
+    cy = sum(math.sin(b) for b in bearings) / len(bearings)
+    centre = math.atan2(cy, cx)
+    deltas = [_wrap(b - centre) for b in bearings]
+    reach = max(math.sqrt(sum(v * v for v in p))
+                for s in swept for p in arm_points(s.q))
+
+    zone = Zone(name=args.zone, az_center=centre,
+                az_lo=min(deltas), az_hi=max(deltas), floor=floor,
+                r_max=reach if args.limit_reach else math.inf)
+    lo, hi = zone.bounds_deg()
+    print(f"\n  arc swept: {lo:.0f} to {hi:.0f} deg ({zone.arc_deg:.0f} deg wide)")
+    print(f"  furthest the arm reached while sweeping: {reach:.3f} m"
+          + ("  (enforced)" if args.limit_reach else "  (recorded only)"))
+    if not args.limit_reach:
+        print("  reach is NOT capped: a casual sweep rarely reaches as far as the")
+        print("  arm legitimately can. Pass --limit-reach if you meant it as a limit.")
+
+    env.dome.zones = [z for z in env.dome.zones if z.name != zone.name] + [zone]
+    env.save(args.out)
+    print("\n" + "\n".join(env.dome.describe()))
+    print(f"\nsaved to {args.out}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="192.168.10.24")
@@ -143,6 +210,14 @@ def main():
     ap.add_argument("--from-marks", action="store_true",
                     help="build the envelope from marked poses only, ignoring "
                          "the motion between them (implied by --guided)")
+    ap.add_argument("--zone", default=None, metavar="NAME",
+                    help="teach one bearing sector's limit into an existing "
+                         "envelope: hold the arm at the lowest safe pose, then "
+                         "sweep the arc that limit applies to")
+    ap.add_argument("--clearance", type=float, default=0.02,
+                    help="raise a taught zone floor by this much (default 0.02 m)")
+    ap.add_argument("--limit-reach", action="store_true",
+                    help="also cap reach in the zone at the radius swept")
     ap.add_argument("--free-joints", default="",
                     help="comma-separated joints exempt from the range check, "
                          "e.g. 4,5,6 when the wrists were held still")
@@ -163,6 +238,11 @@ def main():
         raise SystemExit("power on and release brakes before teaching")
     if read_once(args.host) is None:
         raise SystemExit("no telemetry; is another client holding port 30003?")
+
+    if args.zone:
+        print("\nRead-only: hold the pendant Freedrive button to move the arm.")
+        teach_zone(args)
+        return
 
     if args.freedrive is not None:
         print(f"\n!! commanding software freedrive for {args.freedrive:.0f}s.")

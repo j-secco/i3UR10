@@ -88,11 +88,42 @@ def arm_points(joints: Sequence[float],
 
 
 @dataclass
+class Zone:
+    """A bearing sector with a deliberately taught limit.
+
+    The binned sector floors are inferred: "the lowest the arm happened to go
+    in that direction" during a general teaching sweep. A zone is different —
+    the operator held the arm at the limit and said so. Where the two overlap
+    the more restrictive wins, because an inferred floor is evidence of what
+    was reached, not a statement about what is safe.
+    """
+    name: str = ""
+    az_center: float = 0.0
+    az_lo: float = 0.0          # signed offset from centre
+    az_hi: float = 0.0
+    floor: float = 0.0
+    r_max: float = math.inf
+
+    def covers(self, x: float, y: float) -> bool:
+        d = _wrap(math.atan2(y, x) - self.az_center)
+        return self.az_lo <= d <= self.az_hi
+
+    @property
+    def arc_deg(self) -> float:
+        return math.degrees(self.az_hi - self.az_lo)
+
+    def bounds_deg(self) -> tuple:
+        return (math.degrees(_wrap(self.az_center + self.az_lo)) % 360,
+                math.degrees(_wrap(self.az_center + self.az_hi)) % 360)
+
+
+@dataclass
 class Dome:
     """The taught volume: a solid dome with a bearing-dependent floor."""
     r_max: float = 0.0
     z_ceiling: float = 0.0
     sector_floors: List[float] = field(default_factory=list)   # len == FLOOR_SECTORS
+    zones: List[Zone] = field(default_factory=list)
 
     @staticmethod
     def _sector(x: float, y: float) -> int:
@@ -119,15 +150,33 @@ class Dome:
         return cls(r_max=r_max, z_ceiling=z_ceiling, sector_floors=floors)
 
     def floor_at(self, x: float, y: float) -> float:
-        if not self.sector_floors:
-            return -math.inf
-        return self.sector_floors[self._sector(x, y)]
+        floor = self.sector_floors[self._sector(x, y)] if self.sector_floors else -math.inf
+        for z in self.zones:
+            if z.covers(x, y):
+                floor = max(floor, z.floor)
+        return floor
+
+    def reach_at(self, x: float, y: float) -> float:
+        r = self.r_max
+        for z in self.zones:
+            if z.covers(x, y):
+                r = min(r, z.r_max)
+        return r
+
+    def zone_at(self, x: float, y: float) -> Optional[Zone]:
+        for z in self.zones:
+            if z.covers(x, y):
+                return z
+        return None
 
     def outside(self, point: Sequence[float], tol_m: float = 0.01) -> Optional[str]:
         x, y, z = point
         r = math.sqrt(x * x + y * y + z * z)
-        if r > self.r_max + tol_m:
-            return f"{r:.3f} m from the base, beyond the taught {self.r_max:.3f} m"
+        zone = self.zone_at(x, y)
+        where = f" in zone '{zone.name}'" if zone else ""
+        reach = self.reach_at(x, y)
+        if r > reach + tol_m:
+            return f"{r:.3f} m from the base, beyond the {reach:.3f} m allowed{where}"
         if z > self.z_ceiling + tol_m:
             return f"z {z:.3f} m, above the taught ceiling {self.z_ceiling:.3f} m"
         if math.hypot(x, y) > BASE_EXCLUSION_R:
@@ -135,7 +184,7 @@ class Dome:
             if z < floor - tol_m:
                 bearing = math.degrees(math.atan2(y, x)) % 360.0
                 return (f"z {z:.3f} m at bearing {bearing:.0f} deg, below the "
-                        f"{floor:.3f} m taught in that direction")
+                        f"{floor:.3f} m floor{where or ' taught in that direction'}")
         return None
 
     def describe(self) -> List[str]:
@@ -144,7 +193,19 @@ class Dome:
                  f"  ceiling   {self.z_ceiling:.3f} m",
                  f"  floor     varies with bearing:"]
         for i, f in enumerate(self.sector_floors):
-            lines.append(f"      {i * step:>3}-{(i + 1) * step:<3} deg   {f:>7.3f} m")
+            zf = [z for z in self.zones
+                  if z.covers(math.cos(math.radians((i + .5) * step)),
+                              math.sin(math.radians((i + .5) * step)))]
+            tag = f"   <- zone '{zf[0].name}'" if zf else ""
+            eff = max([f] + [z.floor for z in zf])
+            lines.append(f"      {i * step:>3}-{(i + 1) * step:<3} deg   {eff:>7.3f} m{tag}")
+        if self.zones:
+            lines.append("  taught zones (deliberate limits, they win over the bins):")
+            for z in self.zones:
+                lo, hi = z.bounds_deg()
+                rr = "" if z.r_max == math.inf else f", reach {z.r_max:.3f} m"
+                lines.append(f"      {z.name:<12} {lo:>5.0f}-{hi:<5.0f} deg  "
+                             f"floor {z.floor:+.3f} m{rr}")
         return lines
 
 
@@ -233,8 +294,13 @@ class Envelope:
     # --------------------------------------------------------------- io
 
     def save(self, path: str = DEFAULT_PATH) -> str:
+        data = asdict(self)
+        # JSON has no infinity; an unlimited zone reach is stored as null.
+        for z in (data.get("dome") or {}).get("zones", []):
+            if z.get("r_max") == math.inf:
+                z["r_max"] = None
         with open(path, "w") as fh:
-            json.dump(asdict(self), fh, indent=2)
+            json.dump(data, fh, indent=2)
         return path
 
     @classmethod
@@ -249,6 +315,9 @@ class Envelope:
                 r_max=d.get("r_max", d.get("rmax", 0.0)),
                 z_ceiling=d.get("z_ceiling", 0.0),
                 sector_floors=d.get("sector_floors", []),
+                zones=[Zone(**{**z, "r_max": (math.inf if z.get("r_max") is None
+                                              else z["r_max"])})
+                       for z in d.get("zones", [])],
             ) if "sector_floors" in d else None
         return cls(**data)
 
