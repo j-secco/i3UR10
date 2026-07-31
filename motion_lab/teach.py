@@ -53,6 +53,11 @@ PRIMARY_PORT = 30001
 DASHBOARD_PORT = 29999
 MAX_FREEDRIVE_SECONDS = 300
 
+# Every prompt accepts the same words for "I am finished". Two modes with two
+# different keys is a trap when the operator is standing at the robot with one
+# hand on the Freedrive button.
+DONE_WORDS = ("d", "q", "done", "quit", "finish", "end")
+
 # UR10 joints travel +/-360 degrees. Hand-guiding the arm round the base
 # several times in the same direction winds J1 up without anything physical
 # stopping it, and once a joint is past its limit the robot sits in Recovery
@@ -188,14 +193,14 @@ def measure_obstacle(args):
         print("Put the FLANGE CENTRE on each corner of the solid's TOP edge and press")
         print("Enter. Go round in order -- the points become a footprint polygon, and")
         print("their height becomes the top surface.")
-        print("  Enter  record a corner      u  undo the last one")
-        print("  d      done                 Ctrl-C  abort\n")
+        print("  Enter    record a corner        u  undo the last one")
+        print("  d or q   done, and save         Ctrl-C  same\n")
         while True:
             try:
                 line = input(f"  [{len(corners)} corners] ").strip().lower()
             except EOFError:
                 line = "d"
-            if line == "d":
+            if line in DONE_WORDS:
                 break
             if line == "u":
                 if corners:
@@ -422,8 +427,8 @@ def main():
         try:
             if args.guided:
                 print("\nGuided teaching. Move the arm to each pose, then press Enter.")
-                print("  Enter  record this pose      s  skip it")
-                print("  q      finish and save       Ctrl-C  same\n")
+                print("  Enter    record this pose       s  skip it")
+                print("  d or q   finish and save        Ctrl-C  same\n")
                 done_early = False
                 for name, prompt in GUIDED_STEPS:
                     while True:
@@ -431,7 +436,7 @@ def main():
                             answer = input(f"  [{name}] {prompt} ... ").strip().lower()
                         except EOFError:
                             answer = "q"
-                        if answer in ("q", "quit", "done"):
+                        if answer in DONE_WORDS:
                             done_early = True
                             break
                         if answer == "s":
@@ -453,13 +458,13 @@ def main():
                         break
                 if not done_early:
                     print("\nChecklist done. Name an extra pose + Enter to mark it, "
-                          "or 'q' to finish.")
+                          "or 'q' / 'd' to finish.")
                     while True:
                         try:
                             line = input().strip()
                         except EOFError:
                             break
-                        if line.lower() in ("q", "quit", "done"):
+                        if line.lower() in DONE_WORDS:
                             break
                         s = current_pose(rec)
                         if s is not None:
@@ -474,13 +479,13 @@ def main():
                     time.sleep(0.2)
             else:
                 print("\nEnter a name + Enter to mark the current pose, "
-                      "or just 'q' + Enter to finish.\n")
+                      "or 'q' / 'd' + Enter to finish.\n")
                 while True:
                     try:
                         line = input().strip()
                     except EOFError:
                         break
-                    if line.lower() in ("q", "quit", "done"):
+                    if line.lower() in DONE_WORDS:
                         break
                     s = current_pose(rec)
                     if s is not None:
