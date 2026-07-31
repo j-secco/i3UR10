@@ -89,32 +89,42 @@ def arm_points(joints: Sequence[float],
 
 @dataclass
 class Zone:
-    """A bearing sector with a deliberately taught limit.
+    """A deliberately taught limit, held per bearing sector.
 
-    The binned sector floors are inferred: "the lowest the arm happened to go
-    in that direction" during a general teaching sweep. A zone is different —
-    the operator held the arm at the limit and said so. Where the two overlap
-    the more restrictive wins, because an inferred floor is evidence of what
-    was reached, not a statement about what is safe.
+    Not a single floor over an arc. Threading the arm along an obstacle, the
+    clearance varies: tighter at one end, roomier at the other, and the
+    operator raises the arm where it has to come up. Recording one number for
+    the whole sweep throws that away and is wrong in the permissive direction
+    wherever the real limit is tighter than average.
+
+    So the floor is kept per sector, exactly as swept. Keying on the sector
+    index also removes the arc arithmetic entirely, and with it the wrap bug
+    that let a wide sweep swallow the whole circle.
     """
     name: str = ""
-    az_center: float = 0.0
-    az_lo: float = 0.0          # signed offset from centre
-    az_hi: float = 0.0
-    floor: float = 0.0
+    floors: Dict[str, float] = field(default_factory=dict)   # sector index -> floor
     r_max: float = math.inf
 
+    def _key(self, x: float, y: float) -> str:
+        az = math.degrees(math.atan2(y, x)) % 360.0
+        return str(min(FLOOR_SECTORS - 1, int(az // (360.0 / FLOOR_SECTORS))))
+
     def covers(self, x: float, y: float) -> bool:
-        d = _wrap(math.atan2(y, x) - self.az_center)
-        return self.az_lo <= d <= self.az_hi
+        return self._key(x, y) in self.floors
+
+    def floor_at(self, x: float, y: float) -> Optional[float]:
+        return self.floors.get(self._key(x, y))
 
     @property
-    def arc_deg(self) -> float:
-        return math.degrees(self.az_hi - self.az_lo)
+    def sectors(self) -> List[int]:
+        return sorted(int(k) for k in self.floors)
 
-    def bounds_deg(self) -> tuple:
-        return (math.degrees(_wrap(self.az_center + self.az_lo)) % 360,
-                math.degrees(_wrap(self.az_center + self.az_hi)) % 360)
+    def describe(self) -> str:
+        step = 360 // FLOOR_SECTORS
+        parts = [f"{int(k) * step}-{(int(k) + 1) * step}:{v:+.3f}"
+                 for k, v in sorted(self.floors.items(), key=lambda kv: int(kv[0]))]
+        rr = "" if self.r_max == math.inf else f"  reach {self.r_max:.3f} m"
+        return f"{self.name:<12} {len(self.floors)} sectors{rr}\n        " + "  ".join(parts)
 
 
 @dataclass
@@ -152,8 +162,9 @@ class Dome:
     def floor_at(self, x: float, y: float) -> float:
         floor = self.sector_floors[self._sector(x, y)] if self.sector_floors else -math.inf
         for z in self.zones:
-            if z.covers(x, y):
-                floor = max(floor, z.floor)
+            zf = z.floor_at(x, y)
+            if zf is not None:
+                floor = max(floor, zf)
         return floor
 
     def reach_at(self, x: float, y: float) -> float:
@@ -193,19 +204,16 @@ class Dome:
                  f"  ceiling   {self.z_ceiling:.3f} m",
                  f"  floor     varies with bearing:"]
         for i, f in enumerate(self.sector_floors):
-            zf = [z for z in self.zones
-                  if z.covers(math.cos(math.radians((i + .5) * step)),
-                              math.sin(math.radians((i + .5) * step)))]
+            cx, cy = (math.cos(math.radians((i + .5) * step)),
+                      math.sin(math.radians((i + .5) * step)))
+            zf = [z for z in self.zones if z.covers(cx, cy)]
             tag = f"   <- zone '{zf[0].name}'" if zf else ""
-            eff = max([f] + [z.floor for z in zf])
+            eff = max([f] + [z.floor_at(cx, cy) for z in zf])
             lines.append(f"      {i * step:>3}-{(i + 1) * step:<3} deg   {eff:>7.3f} m{tag}")
         if self.zones:
-            lines.append("  taught zones (deliberate limits, they win over the bins):")
+            lines.append("  taught zones (deliberate limits, they raise the bins):")
             for z in self.zones:
-                lo, hi = z.bounds_deg()
-                rr = "" if z.r_max == math.inf else f", reach {z.r_max:.3f} m"
-                lines.append(f"      {z.name:<12} {lo:>5.0f}-{hi:<5.0f} deg  "
-                             f"floor {z.floor:+.3f} m{rr}")
+                lines.append("      " + z.describe())
         return lines
 
 
@@ -315,9 +323,10 @@ class Envelope:
                 r_max=d.get("r_max", d.get("rmax", 0.0)),
                 z_ceiling=d.get("z_ceiling", 0.0),
                 sector_floors=d.get("sector_floors", []),
-                zones=[Zone(**{**z, "r_max": (math.inf if z.get("r_max") is None
-                                              else z["r_max"])})
-                       for z in d.get("zones", [])],
+                zones=[Zone(name=z.get("name", ""),
+                            floors={str(k): v for k, v in (z.get("floors") or {}).items()},
+                            r_max=(math.inf if z.get("r_max") is None else z["r_max"]))
+                       for z in d.get("zones", []) if z.get("floors")],
             ) if "sector_floors" in d else None
         return cls(**data)
 

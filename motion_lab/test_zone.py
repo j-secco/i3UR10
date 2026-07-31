@@ -1,5 +1,5 @@
-"""Verify taught zones: a deliberate limit over a bearing arc, beating the
-inferred sector bins where they overlap. No robot I/O."""
+"""Verify taught zones: a per-sector limit recorded by sweeping along an
+obstacle, tightening the inferred bins where it is stricter. No robot I/O."""
 import math
 import os
 import sys
@@ -8,92 +8,96 @@ import tempfile
 sys.path.insert(0, "src")
 sys.path.insert(0, "motion_lab")
 
-from envelope import Dome, Envelope, Zone
+from envelope import FLOOR_SECTORS, Dome, Envelope, Zone
 
 failures = []
+STEP = 360 // FLOOR_SECTORS
 
-# A dome taught loosely: floor at -0.40 m everywhere.
+# A dome taught loosely: floor at -0.40 m in every direction.
 pts = []
 for deg in range(0, 360, 5):
     a = math.radians(deg)
     for z in (-0.40, 0.30, 0.90):
         pts.append([0.9 * math.cos(a), 0.9 * math.sin(a), z])
 dome = Dome.from_points(pts)
-print(f"base floors: {[round(f, 2) for f in dome.sector_floors]}")
 
-# Now teach a front zone: bearings 330 to 30 deg may not go below +0.10 m.
-front = Zone(name="front", az_center=0.0,
-             az_lo=math.radians(-30), az_hi=math.radians(30), floor=0.10)
-dome.zones = [front]
-
-# 1. The zone tightens its own arc.
-if abs(dome.floor_at(1.0, 0.0) - 0.10) < 1e-9:
-    print("OK  zone raises the floor inside its arc")
-else:
-    failures.append(f"floor in the zone is {dome.floor_at(1.0, 0.0)}, expected 0.10")
-
-# 2. And leaves the rest alone.
-back = dome.floor_at(-1.0, 0.0)
-if abs(back + 0.40) < 1e-6:
-    print("OK  bearings outside the zone keep the taught floor")
-else:
-    failures.append(f"floor outside the zone changed to {back}")
-
-# 3. A point low at the front is refused; the same height at the back is fine.
-if dome.outside([0.9, 0.0, -0.20]) is not None and dome.outside([-0.9, 0.0, -0.20]) is None:
-    print("OK  same height refused at the front, allowed at the back")
-else:
-    failures.append("zone did not discriminate front from back")
-
-# 4. The refusal names the zone, so the message is actionable.
-why = dome.outside([0.9, 0.0, -0.20])
-if why and "front" in why:
-    print(f"OK  refusal names the zone: {why[:64]}")
-else:
-    failures.append(f"refusal did not name the zone: {why}")
-
-# 5. A zone never loosens an already-tighter bin. Teach one at -0.9 where the
-#    bins say -0.40; the bin must win.
-dome.zones = [Zone(name="loose", az_center=math.pi, az_lo=-0.3, az_hi=0.3, floor=-0.90)]
-if abs(dome.floor_at(-1.0, 0.0) + 0.40) < 1e-6:
-    print("OK  a looser zone cannot undercut the inferred floor")
-else:
-    failures.append(f"loose zone undercut the bin: {dome.floor_at(-1.0, 0.0)}")
-
-# 6. Arc wrapping across 0/360 works (the front usually straddles it).
-dome.zones = [front]
-for deg in (350, 355, 0, 5, 20):
+def at(deg, r=0.9):
     a = math.radians(deg)
-    if not front.covers(math.cos(a), math.sin(a)):
-        failures.append(f"zone arc missed bearing {deg}")
+    return r * math.cos(a), r * math.sin(a)
+
+# A front zone swept across three sectors, TIGHTER at one end than the other --
+# the case that a single-floor zone could not express.
+front = Zone(name="front", floors={"0": 0.30, "1": 0.10, "11": 0.05})
+dome.zones = [front]
+print(f"zone 'front' covers sectors {front.sectors} with varying floor")
+
+# 1. Each sector keeps its own limit.
+for sec, expect in (("0", 0.30), ("1", 0.10), ("11", 0.05)):
+    x, y = at(int(sec) * STEP + STEP / 2)
+    if abs(dome.floor_at(x, y) - expect) > 1e-9:
+        failures.append(f"sector {sec} floor {dome.floor_at(x, y)}, expected {expect}")
         break
 else:
-    if not front.covers(math.cos(math.radians(180)), math.sin(math.radians(180))):
-        print("OK  arc wraps across 0 deg and excludes the opposite side")
-    else:
-        failures.append("zone arc wrapped all the way round")
+    print("OK  varying clearance preserved per sector")
 
-# 7. Optional reach cap applies only inside the zone.
-capped = Zone(name="tight", az_center=0.0, az_lo=-0.3, az_hi=0.3, floor=-1.0, r_max=0.5)
-dome.zones = [capped]
-if dome.outside([0.9, 0.0, 0.3]) is not None and dome.outside([-0.9, 0.0, 0.3]) is None:
-    print("OK  zone reach cap applies only within its arc")
+# 2. The tight end really is tighter than the roomy end.
+tx, ty = at(15)          # sector 0, floor 0.30
+rx, ry = at(345)         # sector 11, floor 0.05
+if dome.outside([tx, ty, 0.20]) is not None and dome.outside([rx, ry, 0.20]) is None:
+    print("OK  same height refused at the tight end, allowed at the roomy end")
 else:
-    failures.append("zone reach cap leaked outside its arc")
+    failures.append("zone did not discriminate between its own ends")
 
-# 8. Round-trip, including the unlimited reach that JSON cannot hold.
+# 3. Sectors the sweep never covered are untouched.
+bx, by = at(180)
+if abs(dome.floor_at(bx, by) + 0.40) < 1e-6:
+    print("OK  uncovered bearings keep the inferred floor")
+else:
+    failures.append(f"floor outside the zone changed to {dome.floor_at(bx, by)}")
+
+# 4. A zone can only tighten. One taught lower than the bin must not open it up.
+dome.zones = [Zone(name="loose", floors={"6": -0.90})]
+lx, ly = at(6 * STEP + STEP / 2)
+if abs(dome.floor_at(lx, ly) + 0.40) < 1e-6:
+    print("OK  a looser zone cannot undercut the inferred floor")
+else:
+    failures.append(f"loose zone undercut the bin: {dome.floor_at(lx, ly)}")
+
+# 5. The refusal names the zone and the bearing, so it is actionable.
+dome.zones = [front]
+why = dome.outside([tx, ty, 0.20])
+if why and "front" in why and "bearing" in why:
+    print(f"OK  refusal is specific: {why[:70]}")
+else:
+    failures.append(f"refusal not specific enough: {why}")
+
+# 6. A zone straddling 0 degrees needs no arc arithmetic -- sectors 11 and 0
+#    are simply both present, so there is no wrap to get wrong.
+if front.covers(*at(350)) and front.covers(*at(5)) and not front.covers(*at(180)):
+    print("OK  zone spanning 0 deg works without wrap arithmetic")
+else:
+    failures.append("sector membership across 0 deg is wrong")
+
+# 7. Reach cap applies only where the zone covers.
+dome.zones = [Zone(name="tight", floors={"0": -1.0}, r_max=0.5)]
+if dome.outside([*at(15), 0.3]) is not None and dome.outside([*at(180), 0.3]) is None:
+    print("OK  zone reach cap stays inside its own sectors")
+else:
+    failures.append("zone reach cap leaked outside its sectors")
+
+# 8. Round-trip, including unlimited reach that JSON cannot represent.
 env = Envelope.from_samples([[0.0] * 6])
 env.dome = dome
-env.dome.zones = [front, capped]
+env.dome.zones = [front, Zone(name="tight", floors={"0": -1.0}, r_max=0.5)]
 with tempfile.TemporaryDirectory() as t:
     p = os.path.join(t, "e.json")
     env.save(p)
-    back_env = Envelope.load(p)
-    zs = {z.name: z for z in back_env.dome.zones}
+    zs = {z.name: z for z in Envelope.load(p).dome.zones}
     if (len(zs) == 2 and zs["front"].r_max == math.inf
             and abs(zs["tight"].r_max - 0.5) < 1e-9
-            and abs(zs["front"].floor - 0.10) < 1e-9):
-        print("OK  zones round-trip, unlimited reach preserved as infinity")
+            and abs(zs["front"].floors["0"] - 0.30) < 1e-9
+            and zs["front"].sectors == [0, 1, 11]):
+        print("OK  zones round-trip with their per-sector profile intact")
     else:
         failures.append(f"zones did not round-trip: {zs}")
 

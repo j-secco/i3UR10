@@ -44,8 +44,8 @@ sys.path.insert(0, HERE)
 
 import yaml  # noqa: E402
 
-from envelope import (BASE_EXCLUSION_R, DEFAULT_PATH, Envelope, Zone,  # noqa: E402
-                      _wrap, arm_points)
+from envelope import (BASE_EXCLUSION_R, DEFAULT_PATH, FLOOR_SECTORS,  # noqa: E402
+                      Envelope, Zone, arm_points)
 from telemetry import Recorder, read_once  # noqa: E402
 
 PRIMARY_PORT = 30001
@@ -129,11 +129,13 @@ def live_line(samples):
 
 
 def teach_zone(args):
-    """Teach one sector's real limit and merge it into the saved envelope.
+    """Teach one region's real limit and merge it into the saved envelope.
 
-    Two steps, because a zone is two facts: how low the arm may go there, and
-    over what arc that applies. The floor comes from a pose the operator holds
-    deliberately; the arc comes from sweeping the base through the region.
+    The arm is swept ALONG the obstacle at the lowest height it may safely
+    reach, and the floor is recorded per bearing sector as it goes. Clearance
+    is rarely uniform -- tighter at one end, roomier at the other -- so a
+    single number for the whole sweep would be wrong wherever the real limit
+    is tighter than the average.
     """
     env = Envelope.load_if_present(args.out)
     if env is None or env.dome is None:
@@ -142,50 +144,73 @@ def teach_zone(args):
     rec = Recorder(args.host)
     with rec:
         print(f"\n=== teaching zone '{args.zone}' ===")
-        print("Step 1 of 2. Hold the arm at the LOWEST pose that still clears")
-        print("the obstacle in this sector, then press Enter.")
+        print("Position the arm at the lowest pose that clears the obstacle at ONE END")
+        print("of this region, then press Enter to start recording.")
         try:
             input("  ready... ")
         except EOFError:
             raise SystemExit("aborted")
-        pose = current_pose(rec)
-        if pose is None:
+        if current_pose(rec) is None:
             raise SystemExit("no telemetry")
-        low_pts = [p for p in arm_points(pose.q)
-                   if math.hypot(p[0], p[1]) > BASE_EXCLUSION_R]
-        floor = min(p[2] for p in low_pts) + args.clearance
-        print(f"  lowest part of the arm: {min(p[2] for p in low_pts):+.3f} m")
-        print(f"  zone floor set to {floor:+.3f} m (includes {args.clearance:.3f} m clearance)")
-
-        print("\nStep 2 of 2. Now sweep the arm through the arc this limit covers,")
-        print("then press Enter. Height does not matter here, only bearing.")
         start = len(rec.trace.samples)
+
+        print("\nNow sweep ALONG the obstacle to the other end, keeping the arm as low")
+        print("as it may safely go. Raise it where it has to come up -- that is the")
+        print("point. Press Enter when you reach the far end.")
         try:
-            input("  sweeping... ")
+            input("  recording... ")
         except EOFError:
             pass
         swept = rec.trace.samples[start:]
-        if len(swept) < 20:
-            raise SystemExit("almost nothing recorded during the sweep; try again")
 
-    bearings = [math.atan2(s.tcp[1], s.tcp[0]) for s in swept]
-    cx = sum(math.cos(b) for b in bearings) / len(bearings)
-    cy = sum(math.sin(b) for b in bearings) / len(bearings)
-    centre = math.atan2(cy, cx)
-    deltas = [_wrap(b - centre) for b in bearings]
+    if len(swept) < 40:
+        raise SystemExit(f"only {len(swept)} samples; sweep more slowly")
+
+    # Lowest the whole arm reached, per bearing sector.
+    step = 360 // FLOOR_SECTORS
+    lows, counts = {}, {}
+    for smp in swept:
+        pts = [p for p in arm_points(smp.q) if math.hypot(p[0], p[1]) > BASE_EXCLUSION_R]
+        if not pts:
+            continue
+        key = str(min(FLOOR_SECTORS - 1,
+                      int((math.degrees(math.atan2(smp.tcp[1], smp.tcp[0])) % 360) //
+                          step)))
+        z = min(p[2] for p in pts)
+        lows[key] = min(lows.get(key, math.inf), z)
+        counts[key] = counts.get(key, 0) + 1
+
+    # A sector crossed in a fraction of a second was passed through, not
+    # demonstrated. Requiring a dwell keeps a flick of the wrist from
+    # declaring a limit.
+    MIN_SAMPLES = 15
+    kept = {k: round(v + args.clearance, 4) for k, v in lows.items()
+            if counts[k] >= MIN_SAMPLES}
+    thin = sorted(int(k) for k in lows if counts[k] < MIN_SAMPLES)
+    if not kept:
+        raise SystemExit("no sector was held long enough; sweep more slowly")
+    if len(kept) >= FLOOR_SECTORS - 1:
+        print(f"\n!! this sweep covers {len(kept)} of {FLOOR_SECTORS} sectors -- nearly the")
+        print("!! whole circle. A zone is meant to be a region; if you swept everywhere")
+        print("!! the general teaching mode is the right tool. Saving anyway.")
+
     reach = max(math.sqrt(sum(v * v for v in p))
-                for s in swept for p in arm_points(s.q))
-
-    zone = Zone(name=args.zone, az_center=centre,
-                az_lo=min(deltas), az_hi=max(deltas), floor=floor,
+                for smp in swept for p in arm_points(smp.q))
+    zone = Zone(name=args.zone, floors=kept,
                 r_max=reach if args.limit_reach else math.inf)
-    lo, hi = zone.bounds_deg()
-    print(f"\n  arc swept: {lo:.0f} to {hi:.0f} deg ({zone.arc_deg:.0f} deg wide)")
-    print(f"  furthest the arm reached while sweeping: {reach:.3f} m"
+
+    print(f"\n  {len(swept)} samples over {len(kept)} sectors "
+          f"(+{args.clearance:.3f} m clearance applied)")
+    for k in sorted(kept, key=int):
+        base = env.dome.sector_floors[int(k)]
+        arrow = "raises" if kept[k] > base else "no change (bin is tighter)"
+        print(f"    {int(k) * step:>3}-{(int(k) + 1) * step:<3} deg  "
+              f"{kept[k]:+.3f} m   bin {base:+.3f} m   {arrow}")
+    if thin:
+        print(f"  skipped sectors passed through too quickly: "
+              f"{', '.join(f'{t * step}-{(t + 1) * step}' for t in thin)}")
+    print(f"  furthest the arm reached: {reach:.3f} m"
           + ("  (enforced)" if args.limit_reach else "  (recorded only)"))
-    if not args.limit_reach:
-        print("  reach is NOT capped: a casual sweep rarely reaches as far as the")
-        print("  arm legitimately can. Pass --limit-reach if you meant it as a limit.")
 
     env.dome.zones = [z for z in env.dome.zones if z.name != zone.name] + [zone]
     env.save(args.out)
