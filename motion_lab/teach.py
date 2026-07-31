@@ -30,6 +30,7 @@ pendant safety plane there instead. This tool cannot represent a hole.
 """
 
 import argparse
+import json
 import math
 import os
 import socket
@@ -86,6 +87,37 @@ def freedrive_program(seconds: float) -> str:
         "end\n"
         "lab_teach_freedrive()"
     )
+
+
+def checkpoint(marks, out_path):
+    """Write marks to a sidecar after every one.
+
+    Teaching costs physical effort at the robot. If anything later in the run
+    fails, the poses that were actually walked to should survive it, so they
+    hit the disk immediately rather than only at the end.
+    """
+    if not marks:
+        return
+    try:
+        with open(out_path + ".marks.json", "w") as fh:
+            json.dump(marks, fh, indent=2)
+    except OSError as exc:
+        print(f"  (could not checkpoint marks: {exc})")
+
+
+def current_pose(rec, timeout: float = 3.0):
+    """Latest telemetry sample, waiting briefly for the stream to warm up.
+
+    The recorder needs a moment to connect and the first mark can land inside
+    that window, so wait rather than telling the operator to try again while
+    they are standing at the robot holding the arm.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if rec.trace.samples:
+            return rec.trace.samples[-1]
+        time.sleep(0.05)
+    return None
 
 
 def live_line(samples):
@@ -160,35 +192,52 @@ def main():
         try:
             if args.guided:
                 print("\nGuided teaching. Move the arm to each pose, then press Enter.")
-                print("Type 's' + Enter to skip one you do not want to bound.\n")
+                print("  Enter  record this pose      s  skip it")
+                print("  q      finish and save       Ctrl-C  same\n")
+                done_early = False
                 for name, prompt in GUIDED_STEPS:
                     while True:
-                        answer = input(f"  [{name}] {prompt} ... ").strip().lower()
+                        try:
+                            answer = input(f"  [{name}] {prompt} ... ").strip().lower()
+                        except EOFError:
+                            answer = "q"
+                        if answer in ("q", "quit", "done"):
+                            done_early = True
+                            break
                         if answer == "s":
                             print(f"    skipped {name}")
                             break
-                        if not rec.trace.samples:
-                            print("    no telemetry yet, wait a moment")
+                        s = current_pose(rec)
+                        if s is None:
+                            print("    no telemetry; check the connection")
                             continue
-                        s = rec.trace.samples[-1]
                         marks.append({"name": name, "joints": list(s.q),
                                       "tcp": list(s.tcp)})
+                        checkpoint(marks, args.out)
                         print(f"    recorded {name}: tcp "
-                              f"({s.tcp[0]:.3f}, {s.tcp[1]:.3f}, {s.tcp[2]:.3f}) m")
+                              f"({s.tcp[0]:.3f}, {s.tcp[1]:.3f}, {s.tcp[2]:.3f}) m"
+                              f"   [{len(marks)} marked]")
                         break
-                print("\nChecklist done. Mark any extra poses by name, or 'q' to finish.")
-                while True:
-                    try:
-                        line = input().strip()
-                    except EOFError:
+                    if done_early:
+                        print(f"  finishing early with {len(marks)} marks")
                         break
-                    if line.lower() in ("q", "quit", "done"):
-                        break
-                    if rec.trace.samples:
-                        s = rec.trace.samples[-1]
-                        marks.append({"name": line or f"extra{len(marks) + 1}",
-                                      "joints": list(s.q), "tcp": list(s.tcp)})
-                        print(f"  marked '{marks[-1]['name']}'")
+                if not done_early:
+                    print("\nChecklist done. Name an extra pose + Enter to mark it, "
+                          "or 'q' to finish.")
+                    while True:
+                        try:
+                            line = input().strip()
+                        except EOFError:
+                            break
+                        if line.lower() in ("q", "quit", "done"):
+                            break
+                        s = current_pose(rec)
+                        if s is not None:
+                            marks.append({"name": line or f"extra{len(marks) + 1}",
+                                          "joints": list(s.q), "tcp": list(s.tcp)})
+                            checkpoint(marks, args.out)
+                            print(f"  marked '{marks[-1]['name']}'   "
+                                  f"[{len(marks)} total]")
             elif args.duration is not None:
                 deadline = time.time() + args.duration
                 while time.time() < deadline:
@@ -203,10 +252,11 @@ def main():
                         break
                     if line.lower() in ("q", "quit", "done"):
                         break
-                    if rec.trace.samples:
-                        s = rec.trace.samples[-1]
+                    s = current_pose(rec)
+                    if s is not None:
                         marks.append({"name": line or f"mark{len(marks) + 1}",
                                       "joints": list(s.q), "tcp": list(s.tcp)})
+                        checkpoint(marks, args.out)
                         print(f"  marked '{marks[-1]['name']}' at "
                               f"{[round(math.degrees(v), 1) for v in s.q]}")
         except KeyboardInterrupt:
@@ -258,17 +308,26 @@ def main():
 
     if args.append:
         old = Envelope.load_if_present(args.out)
-        if old:
+        if old and old.dome and env.dome:
+            # Widening a volume: reach further out, higher, and lower in each
+            # bearing sector than either session alone.
             env.joint_min = [min(a, b) for a, b in zip(env.joint_min, old.joint_min)]
             env.joint_max = [max(a, b) for a, b in zip(env.joint_max, old.joint_max)]
-            env.tcp_min = [min(a, b) for a, b in zip(env.tcp_min, old.tcp_min)]
-            env.tcp_max = [max(a, b) for a, b in zip(env.tcp_max, old.tcp_max)]
-            env.elbow_min = [min(a, b) for a, b in zip(env.elbow_min, old.elbow_min)]
-            env.elbow_max = [max(a, b) for a, b in zip(env.elbow_max, old.elbow_max)]
+            env.dome.r_max = max(env.dome.r_max, old.dome.r_max)
+            env.dome.z_ceiling = max(env.dome.z_ceiling, old.dome.z_ceiling)
+            env.dome.sector_floors = [min(a, b) for a, b in
+                                      zip(env.dome.sector_floors, old.dome.sector_floors)]
             env.marks = old.marks + env.marks
             env.samples += old.samples
             print(f"widened the existing envelope from {args.out}")
+        elif old:
+            print(f"ignoring {args.out}: it predates the volume model, rebuild instead")
 
+    if env.narrow_joints():
+        names = ", ".join(f"J{j}" for j in env.narrow_joints())
+        print(f"\nnote: {names} barely moved while teaching. That no longer restricts")
+        print("the robot -- joint ranges are reportage now -- but if you copy them onto")
+        print("the pendant's Joint Limits screen, widen those first.")
     print("\n" + env.report())
     print(f"\nsaved to {env.save(args.out)}")
     print("The lab now refuses any experiment whose path leaves this region.")
