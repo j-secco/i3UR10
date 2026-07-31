@@ -44,15 +44,34 @@ from lab import LAB_MAX_ACCEL_RAD_S2, LAB_MAX_SPEED_RAD_S, Lab, LabError  # noqa
 TRACKING_THRESHOLD = 0.90
 
 
-def scaled(path, factor):
-    """Multiply every speed and acceleration, leaving geometry alone."""
+def scaled(path, v_factor, a_factor):
+    """Scale speed and acceleration independently, leaving geometry alone."""
     out = []
     for wp in path:
         wp = list(wp)
-        wp[6] = min(LAB_MAX_SPEED_RAD_S, wp[6] * factor)
-        wp[7] = min(LAB_MAX_ACCEL_RAD_S2, wp[7] * factor)
+        wp[6] = min(LAB_MAX_SPEED_RAD_S, wp[6] * v_factor)
+        wp[7] = min(LAB_MAX_ACCEL_RAD_S2, wp[7] * a_factor)
         out.append(wp)
     return out
+
+
+def reachable_speed(path, closed=True):
+    """Fastest speed the leading joint can actually reach on this path.
+
+    A joint accelerating at `a` over a leg of `d` radians tops out at
+    sqrt(a*d) before it must brake for the corner, so commanding more than
+    that is asking for a speed the geometry cannot deliver. This is why
+    raising the speed cap alone changed nothing: the binding constraint was
+    acceleration, not velocity.
+    """
+    best = 0.0
+    n = len(path)
+    count = n if closed else n - 1
+    for i in range(count):
+        j = (i + 1) % n
+        d = max(abs(a - b) for a, b in zip(path[i][:6], path[j][:6]))
+        best = max(best, (path[i][7] * d) ** 0.5)
+    return best
 
 
 def main():
@@ -62,7 +81,10 @@ def main():
     ap.add_argument("--seconds", type=float, default=10.0,
                     help="run time per speed step")
     ap.add_argument("--steps", default="1.0,1.25,1.5,1.75",
-                    help="comma-separated speed multipliers")
+                    help="comma-separated multipliers")
+    ap.add_argument("--mode", default="accel", choices=("accel", "speed", "both"),
+                    help="which axis to ramp. Default 'accel': on short legs the "
+                         "arm is acceleration-limited, so speed alone changes nothing.")
     ap.add_argument("--settle", type=float, default=3.0)
     args = ap.parse_args()
 
@@ -74,11 +96,23 @@ def main():
     if blend.problems(base, closed=True):
         raise SystemExit("repaired path still violates the blend rule; fix that first")
 
-    print(f"=== {args.demo}: speed ramp over {factors} ===")
+    def factors_for(f):
+        return (f, f) if args.mode == "both" else \
+               (f, 1.0) if args.mode == "speed" else (1.0, f)
+
+    print(f"=== {args.demo}: ramping {args.mode} over {factors} ===")
+    print(f"{'factor':>7} {'cmd v':>7} {'accel':>7} {'reachable':>10}  limited by")
     for f in factors:
-        p = scaled(base, f)
-        print(f"  x{f:<5} commanded peak {max(w[6] for w in p):.2f} rad/s, "
-              f"accel {max(w[7] for w in p):.2f} rad/s^2")
+        vf, af = factors_for(f)
+        p = scaled(base, vf, af)
+        cmd_v = max(w[6] for w in p)
+        reach = reachable_speed(p)
+        limiter = "acceleration" if reach < cmd_v else "commanded speed"
+        print(f"  x{f:<5.2f} {cmd_v:>6.2f} {max(w[7] for w in p):>7.2f} "
+              f"{reach:>10.2f}  {limiter}")
+    print("\n  'reachable' is sqrt(accel x leg) for the longest leg: the fastest the "
+          "\n  leading joint can get before it must brake. Commanding above it is wasted.")
+    print(f"  UR10 joint ceilings: 2.09 rad/s base/shoulder, 3.14 rad/s elbow/wrists.")
 
     if not args.confirm:
         print("\nAnalysis only. Re-run with --confirm to measure on the robot.")
@@ -96,8 +130,11 @@ def main():
     ceiling = None
 
     for f in factors:
-        path = scaled(base, f)
-        commanded = max(w[6] for w in path)
+        vf, af = factors_for(f)
+        path = scaled(base, vf, af)
+        # Compare against what the geometry allows, not what we typed: if the
+        # commanded speed is unreachable the tracking ratio is meaningless.
+        commanded = min(max(w[6] for w in path), reachable_speed(path))
         try:
             lab.check_waypoints(path, closed=True)
         except LabError as exc:

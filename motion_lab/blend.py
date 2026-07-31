@@ -149,16 +149,23 @@ def dedupe(waypoints: Sequence[Sequence[float]],
 
 
 def repair(waypoints: Sequence[Sequence[float]], closed: bool = True,
-           fraction: float = 0.35) -> List[List[float]]:
+           fraction: float = 0.35, only_reduce: bool = True) -> List[List[float]]:
     """Return a path with degenerate legs removed and legal blend radii.
 
     Speeds and accelerations are untouched: this changes only the geometry of
     the corners, never how fast the arm is asked to move.
+
+    only_reduce (default) keeps any radius that was already legal, so the
+    repair fixes violations without reshaping the parts of the choreography
+    that were fine. Measured on Sprint, letting radii GROW to the geometric
+    maximum rounded the long sweeps so much that peak TCP speed fell from
+    0.67 to 0.55 m/s -- legal, but a visibly tamer motion. The author's
+    radius is a choreographic choice; only the illegal ones need touching.
     """
     fixed = dedupe(waypoints)
-    radii = suggest_radii(fixed, closed=closed, fraction=fraction)
-    for wp, r in zip(fixed, radii):
-        wp[8] = r
+    largest = suggest_radii(fixed, closed=closed, fraction=fraction)
+    for wp, cap in zip(fixed, largest):
+        wp[8] = min(wp[8], cap) if only_reduce else cap
     return fixed
 
 
