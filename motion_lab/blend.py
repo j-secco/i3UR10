@@ -128,6 +128,40 @@ def suggest_radii(waypoints: Sequence[Sequence[float]], closed: bool = True,
     return out
 
 
+def dedupe(waypoints: Sequence[Sequence[float]],
+           tol_m: float = 1e-6) -> List[List[float]]:
+    """Drop waypoints that are geometrically identical to their predecessor.
+
+    A zero-length leg cannot host a blend at any radius, and the arm has
+    nowhere to travel, so the waypoint is pure cost: it forces the controller
+    to resolve a blend against a degenerate segment. Several demos contain
+    these (SprintDemo's 'Sprint Ctr' and 'Lower' are the same pose).
+    """
+    out: List[List[float]] = []
+    for wp in waypoints:
+        if out and math.dist(tcp_xyz(out[-1][:6]), tcp_xyz(wp[:6])) < tol_m:
+            continue
+        out.append(list(wp))
+    # The path loops, so also collapse a final waypoint equal to the first.
+    while len(out) > 2 and math.dist(tcp_xyz(out[-1][:6]), tcp_xyz(out[0][:6])) < tol_m:
+        out.pop()
+    return out
+
+
+def repair(waypoints: Sequence[Sequence[float]], closed: bool = True,
+           fraction: float = 0.35) -> List[List[float]]:
+    """Return a path with degenerate legs removed and legal blend radii.
+
+    Speeds and accelerations are untouched: this changes only the geometry of
+    the corners, never how fast the arm is asked to move.
+    """
+    fixed = dedupe(waypoints)
+    radii = suggest_radii(fixed, closed=closed, fraction=fraction)
+    for wp, r in zip(fixed, radii):
+        wp[8] = r
+    return fixed
+
+
 def report(waypoints: Sequence[Sequence[float]], closed: bool = True,
            title: str = "") -> str:
     legs = analyse(waypoints, closed)
