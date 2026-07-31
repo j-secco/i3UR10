@@ -53,6 +53,7 @@ DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # open-side value and would allow the arm down on the tight side too. The
 # resolution has to be finer than the features it is meant to describe.
 FLOOR_SECTORS = 24
+RING_WIDTH_M = 0.20         # radial resolution of the floor grid
 SAMPLES_PER_LINK = 6        # points sampled along each link when testing the arm
 
 # Inside this horizontal distance of the base axis the arm is structurally
@@ -93,25 +94,22 @@ def arm_points(joints: Sequence[float],
 
 @dataclass
 class Zone:
-    """A deliberately taught limit, held per bearing sector.
+    """A deliberately taught limit, held per grid cell.
 
-    Not a single floor over an arc. Threading the arm along an obstacle, the
-    clearance varies: tighter at one end, roomier at the other, and the
-    operator raises the arm where it has to come up. Recording one number for
-    the whole sweep throws that away and is wrong in the permissive direction
-    wherever the real limit is tighter than average.
-
-    So the floor is kept per sector, exactly as swept. Keying on the sector
-    index also removes the arc arithmetic entirely, and with it the wrap bug
-    that let a wide sweep swallow the whole circle.
+    Keyed the same way as the dome's floor grid -- bearing sector AND radial
+    ring -- because a limit recorded per bearing alone repeats the mistake the
+    grid exists to fix: the deep reach available far out gets authorised close
+    in, where the cart is.
     """
     name: str = ""
-    floors: Dict[str, float] = field(default_factory=dict)   # sector index -> floor
+    floors: Dict[str, float] = field(default_factory=dict)   # "sector,ring" -> floor
     r_max: float = math.inf
 
-    def _key(self, x: float, y: float) -> str:
+    @staticmethod
+    def _key(x: float, y: float) -> str:
         az = math.degrees(math.atan2(y, x)) % 360.0
-        return str(min(FLOOR_SECTORS - 1, int(az // (360.0 / FLOOR_SECTORS))))
+        sec = min(FLOOR_SECTORS - 1, int(az // (360.0 / FLOOR_SECTORS)))
+        return f"{sec},{int(math.hypot(x, y) // RING_WIDTH_M)}"
 
     def covers(self, x: float, y: float) -> bool:
         return self._key(x, y) in self.floors
@@ -121,64 +119,84 @@ class Zone:
 
     @property
     def sectors(self) -> List[int]:
-        return sorted(int(k) for k in self.floors)
+        return sorted({int(k.split(",")[0]) for k in self.floors})
 
     def describe(self) -> str:
-        step = 360 // FLOOR_SECTORS
-        parts = [f"{int(k) * step}-{(int(k) + 1) * step}:{v:+.3f}"
-                 for k, v in sorted(self.floors.items(), key=lambda kv: int(kv[0]))]
         rr = "" if self.r_max == math.inf else f"  reach {self.r_max:.3f} m"
-        return f"{self.name:<12} {len(self.floors)} sectors{rr}\n        " + "  ".join(parts)
+        vals = list(self.floors.values())
+        return (f"{self.name:<12} {len(self.floors)} cells across "
+                f"{len(self.sectors)} bearings, floor "
+                f"{min(vals):+.3f} to {max(vals):+.3f} m{rr}")
 
 
 @dataclass
 class Dome:
-    """The taught volume: a solid dome with a bearing-dependent floor."""
+    """The taught volume. The floor is a polar GRID, not a profile.
+
+    An earlier version varied the floor with bearing alone. That is wrong
+    wherever the obstacle is near the base, which is the usual case: this arm
+    sits on a cart, so it cannot descend close in but can drop far below the
+    base plane once it reaches past the cart's edge. Recording only bearing
+    took the deep reach demonstrated at 1.2 m and authorised the same depth at
+    0.3 m -- straight into the cart.
+
+    Measured on this cell, the lowest the arm was ever taken runs -0.018 m at
+    0.2-0.4 m from the base axis, -0.161 m at 0.6-0.8 m, and -0.435 m at
+    1.0-1.2 m. The floor is a function of both bearing and radius, so the grid
+    is indexed by both.
+    """
     r_max: float = 0.0
     z_ceiling: float = 0.0
-    sector_floors: List[float] = field(default_factory=list)   # len == FLOOR_SECTORS
-    zones: List[Zone] = field(default_factory=list)
+    cells: Dict[str, float] = field(default_factory=dict)   # "sector,ring" -> floor
+    zones: List["Zone"] = field(default_factory=list)
 
     @staticmethod
-    def _sector(x: float, y: float) -> int:
+    def _key(x: float, y: float) -> str:
         az = math.degrees(math.atan2(y, x)) % 360.0
-        return min(FLOOR_SECTORS - 1, int(az // (360.0 / FLOOR_SECTORS)))
+        sec = min(FLOOR_SECTORS - 1, int(az // (360.0 / FLOOR_SECTORS)))
+        ring = int(math.hypot(x, y) // RING_WIDTH_M)
+        return f"{sec},{ring}"
+
+    @staticmethod
+    def _parts(key: str) -> tuple:
+        a, b = key.split(",")
+        return int(a), int(b)
 
     @classmethod
     def from_points(cls, points: Sequence[Sequence[float]]) -> "Dome":
-        buckets: Dict[int, List[float]] = {i: [] for i in range(FLOOR_SECTORS)}
-        r_max = 0.0
-        z_ceiling = -math.inf
+        cells: Dict[str, float] = {}
+        r_max, z_ceiling = 0.0, -math.inf
         for p in points:
             r_max = max(r_max, math.sqrt(sum(v * v for v in p)))
             z_ceiling = max(z_ceiling, p[2])
-            buckets[cls._sector(p[0], p[1])].append(p[2])
-
-        taught = [min(v) for v in buckets.values() if v]
-        # A sector nobody demonstrated gets the most restrictive floor that
-        # was demonstrated anywhere. Refusing to guess downward is the whole
-        # point of teaching.
-        fallback = max(taught) if taught else 0.0
-        floors = [min(buckets[i]) if buckets[i] else fallback
-                  for i in range(FLOOR_SECTORS)]
-        return cls(r_max=r_max, z_ceiling=z_ceiling, sector_floors=floors)
+            if math.hypot(p[0], p[1]) <= BASE_EXCLUSION_R:
+                continue
+            k = cls._key(p[0], p[1])
+            cells[k] = min(cells.get(k, math.inf), p[2])
+        return cls(r_max=r_max, z_ceiling=z_ceiling,
+                   cells={k: round(v, 4) for k, v in cells.items()})
 
     def floor_at(self, x: float, y: float) -> float:
-        """Zone floors are AUTHORITATIVE in the sectors they cover.
+        """Lowest height allowed here. Zones win; then the demonstrated cell;
+        then the most restrictive thing known further in.
 
-        They are not merely combined with the inferred bins, because they are
-        better data: a zone is a slow deliberate sweep along the obstacle with
-        a dwell requirement, where a bin is whatever the arm happened to do
-        while passing through. At 15-degree resolution a bin backed by a
-        handful of poses is easily too high by a few centimetres, and a
-        tighten-only rule would make that unfixable -- no amount of careful
-        re-teaching could ever bring it back down.
+        A cell nobody demonstrated inherits from the nearest INNER ring in the
+        same bearing sector, because the floor rises as the arm comes closer to
+        the base and inheriting inward is therefore the conservative direction.
         """
-        zoned = [z.floor_at(x, y) for z in self.zones]
-        zoned = [f for f in zoned if f is not None]
+        zoned = [f for f in (z.floor_at(x, y) for z in self.zones) if f is not None]
         if zoned:
-            return max(zoned)          # overlapping zones: the tighter wins
-        return self.sector_floors[self._sector(x, y)] if self.sector_floors else -math.inf
+            return max(zoned)          # where zones overlap, the tighter wins
+        if not self.cells:
+            return -math.inf
+        sec, ring = self._parts(self._key(x, y))
+        if f"{sec},{ring}" in self.cells:
+            return self.cells[f"{sec},{ring}"]
+        inner = [self.cells[f"{sec},{r}"] for r in range(ring, -1, -1)
+                 if f"{sec},{r}" in self.cells]
+        if inner:
+            return inner[0]
+        return max(self.cells.values())
 
     def reach_at(self, x: float, y: float) -> float:
         r = self.r_max
@@ -187,7 +205,7 @@ class Dome:
                 r = min(r, z.r_max)
         return r
 
-    def zone_at(self, x: float, y: float) -> Optional[Zone]:
+    def zone_at(self, x: float, y: float) -> Optional["Zone"]:
         for z in self.zones:
             if z.covers(x, y):
                 return z
@@ -203,28 +221,32 @@ class Dome:
             return f"{r:.3f} m from the base, beyond the {reach:.3f} m allowed{where}"
         if z > self.z_ceiling + tol_m:
             return f"z {z:.3f} m, above the taught ceiling {self.z_ceiling:.3f} m"
-        if math.hypot(x, y) > BASE_EXCLUSION_R:
+        hr = math.hypot(x, y)
+        if hr > BASE_EXCLUSION_R:
             floor = self.floor_at(x, y)
             if z < floor - tol_m:
                 bearing = math.degrees(math.atan2(y, x)) % 360.0
-                return (f"z {z:.3f} m at bearing {bearing:.0f} deg, below the "
-                        f"{floor:.3f} m floor{where or ' taught in that direction'}")
+                return (f"z {z:.3f} m at bearing {bearing:.0f} deg and {hr:.2f} m out, "
+                        f"below the {floor:.3f} m taught there{where}")
         return None
 
     def describe(self) -> List[str]:
         step = 360 // FLOOR_SECTORS
+        rings = sorted({self._parts(k)[1] for k in self.cells})
         lines = [f"  reach     out to {self.r_max:.3f} m from the base",
                  f"  ceiling   {self.z_ceiling:.3f} m",
-                 f"  floor     varies with bearing:"]
-        for i, f in enumerate(self.sector_floors):
-            cx, cy = (math.cos(math.radians((i + .5) * step)),
-                      math.sin(math.radians((i + .5) * step)))
-            zf = [z for z in self.zones if z.covers(cx, cy)]
-            tag = f"   <- zone '{zf[0].name}'" if zf else ""
-            eff = max([f] + [z.floor_at(cx, cy) for z in zf])
-            lines.append(f"      {i * step:>3}-{(i + 1) * step:<3} deg   {eff:>7.3f} m{tag}")
+                 f"  floor     grid of {len(self.cells)} taught cells "
+                 f"({FLOOR_SECTORS} bearings x {len(rings)} rings of "
+                 f"{RING_WIDTH_M:.2f} m)",
+                 "            lowest demonstrated height by distance out:"]
+        for ring in rings:
+            vals = [v for k, v in self.cells.items() if self._parts(k)[1] == ring]
+            lines.append(f"              {ring * RING_WIDTH_M:.1f}-"
+                         f"{(ring + 1) * RING_WIDTH_M:.1f} m   "
+                         f"{min(vals):>+7.3f} to {max(vals):>+7.3f} m  "
+                         f"({len(vals)} of {FLOOR_SECTORS} bearings)")
         if self.zones:
-            lines.append("  taught zones (deliberate limits, they raise the bins):")
+            lines.append("  taught zones:")
             for z in self.zones:
                 lines.append("      " + z.describe())
         return lines
@@ -335,12 +357,12 @@ class Envelope:
             data["dome"] = Dome(
                 r_max=d.get("r_max", d.get("rmax", 0.0)),
                 z_ceiling=d.get("z_ceiling", 0.0),
-                sector_floors=d.get("sector_floors", []),
+                cells=d.get("cells", {}),
                 zones=[Zone(name=z.get("name", ""),
                             floors={str(k): v for k, v in (z.get("floors") or {}).items()},
                             r_max=(math.inf if z.get("r_max") is None else z["r_max"]))
                        for z in d.get("zones", []) if z.get("floors")],
-            ) if "sector_floors" in d else None
+            ) if "cells" in d else None
         return cls(**data)
 
     @classmethod
@@ -363,10 +385,10 @@ class Envelope:
         if self.dome is not None:
             lines.append("\nTaught volume (this is what is enforced):")
             lines.extend(self.dome.describe())
-            spread = max(self.dome.sector_floors) - min(self.dome.sector_floors)
-            if spread > 0.10:
-                lines.append(f"\n  the floor varies by {spread:.2f} m with bearing -- a single")
-                lines.append("  global floor would be permissive where the obstacles are")
+            if self.dome.cells:
+                spread = max(self.dome.cells.values()) - min(self.dome.cells.values())
+                lines.append(f"\n  the floor varies by {spread:.2f} m across the grid -- it depends")
+                lines.append("  on how far out the arm is, not only which way it points")
 
         lines.append("\nJoint ranges observed while teaching. NOT enforced (the arm may")
         lines.append("pose however it likes inside the volume). Useful for the pendant:")

@@ -31,8 +31,7 @@ for dj1 in [i * 0.15 for i in range(-20, 21)]:
     if dj1 > 0.6:                      # only reach down on the far side
         taught.append(swing(dj1=dj1, dj2=0.5))
 env = Envelope.from_samples(taught)
-print(f"taught {len(taught)} poses; floors by sector: "
-      f"{[round(f, 2) for f in env.dome.sector_floors]}")
+print(f"taught {len(taught)} poses; {len(env.dome.cells)} floor cells")
 
 # 1. A pose using a joint fold never demonstrated, but sitting inside the
 #    taught volume, must be allowed. This is the whole correction.
@@ -83,16 +82,19 @@ else:
 
 # 6. Sectors nobody demonstrated inherit the most restrictive taught floor
 #    rather than a guessed one.
-d = Dome.from_points([[1.0, 0.0, 0.5], [1.0, 0.1, 0.2]])   # one sector only
-if len(d.sector_floors) == FLOOR_SECTORS and max(d.sector_floors) == min(
-        [f for f in d.sector_floors if f == max(d.sector_floors)]):
-    untaught = d.floor_at(-1.0, 0.0)
-    if untaught >= 0.2 - 1e-9:
-        print("OK  untaught sectors inherit the most restrictive taught floor")
-    else:
-        failures.append(f"untaught sector floor guessed downward: {untaught}")
+d = Dome.from_points([[1.0, 0.0, 0.5], [1.0, 0.1, 0.2]])   # one cell only
+if d.cells and d.floor_at(-1.0, 0.0) >= 0.2 - 1e-9:
+    print("OK  untaught cells inherit the most restrictive taught floor")
 else:
-    failures.append("sector floors not populated")
+    failures.append(f"untaught cell floor guessed downward: {d.floor_at(-1.0, 0.0)}")
+
+# 6b. The floor depends on distance out, not bearing alone. Teaching a deep
+#     reach far from the base must not authorise the same depth close in.
+far = Dome.from_points([[1.20, 0.0, -0.40], [0.35, 0.0, 0.05]])
+if far.outside([1.20, 0.0, -0.35]) is None and far.outside([0.35, 0.0, -0.35]) is not None:
+    print("OK  deep reach far out does not authorise the same depth close in")
+else:
+    failures.append("floor grid is not distinguishing radius")
 
 # 7. Structure near the base axis is exempt: a positive floor must not reject
 #    the base and shoulder, which live at z = 0 to 0.127.
@@ -107,8 +109,8 @@ with tempfile.TemporaryDirectory() as t:
     p = os.path.join(t, "e.json")
     env.save(p)
     back = Envelope.load(p)
-    if isinstance(back.dome, Dome) and back.dome.sector_floors == env.dome.sector_floors:
-        print("OK  envelope round-trips with its sector floors intact")
+    if isinstance(back.dome, Dome) and back.dome.cells == env.dome.cells:
+        print("OK  envelope round-trips with its floor grid intact")
     else:
         failures.append("envelope did not round-trip")
 

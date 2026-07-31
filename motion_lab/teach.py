@@ -173,26 +173,27 @@ def teach_zone(args):
         pts = [p for p in arm_points(smp.q) if math.hypot(p[0], p[1]) > BASE_EXCLUSION_R]
         if not pts:
             continue
-        key = str(min(FLOOR_SECTORS - 1,
-                      int((math.degrees(math.atan2(smp.tcp[1], smp.tcp[0])) % 360) //
-                          step)))
-        z = min(p[2] for p in pts)
-        lows[key] = min(lows.get(key, math.inf), z)
-        counts[key] = counts.get(key, 0) + 1
+        # One cell per arm point: a zone limit belongs to where that part of
+        # the arm actually was, in bearing AND distance out.
+        for pt in pts:
+            key = Zone._key(pt[0], pt[1])
+            lows[key] = min(lows.get(key, math.inf), pt[2])
+            counts[key] = counts.get(key, 0) + 1
 
     # A sector crossed in a fraction of a second was passed through, not
     # demonstrated. Requiring a dwell keeps a flick of the wrist from
     # declaring a limit.
-    MIN_SAMPLES = 15
+    MIN_SAMPLES = 25
     kept = {k: round(v + args.clearance, 4) for k, v in lows.items()
             if counts[k] >= MIN_SAMPLES}
-    thin = sorted(int(k) for k in lows if counts[k] < MIN_SAMPLES)
+    thin = [k for k in lows if counts[k] < MIN_SAMPLES]
     if not kept:
         raise SystemExit("no sector was held long enough; sweep more slowly")
-    if len(kept) >= FLOOR_SECTORS - 1:
-        print(f"\n!! this sweep covers {len(kept)} of {FLOOR_SECTORS} sectors -- nearly the")
-        print("!! whole circle. A zone is meant to be a region; if you swept everywhere")
-        print("!! the general teaching mode is the right tool. Saving anyway.")
+    bearings = {k.split(",")[0] for k in kept}
+    if len(bearings) >= FLOOR_SECTORS - 2:
+        print(f"\n!! this sweep touches {len(bearings)} of {FLOOR_SECTORS} bearings -- nearly")
+        print("!! the whole circle. A zone is meant to be a region; if you swept")
+        print("!! everywhere, general teaching is the right tool. Saving anyway.")
 
     reach = max(math.sqrt(sum(v * v for v in p))
                 for smp in swept for p in arm_points(smp.q))
@@ -201,16 +202,17 @@ def teach_zone(args):
 
     print(f"\n  {len(swept)} samples over {len(kept)} sectors "
           f"(+{args.clearance:.3f} m clearance applied)")
-    for k in sorted(kept, key=int):
-        base = env.dome.sector_floors[int(k)]
+    for k in sorted(kept, key=lambda kk: (int(kk.split(",")[0]), int(kk.split(",")[1]))):
+        base = env.dome.cells.get(k, float("nan"))
         d = kept[k] - base
         arrow = ("raises" if d > 0.005 else "lowers" if d < -0.005 else "matches") + \
                 f" the inferred bin by {abs(d):.3f} m" if abs(d) > 0.005 else "matches the bin"
-        print(f"    {int(k) * step:>3}-{(int(k) + 1) * step:<3} deg  "
-              f"{kept[k]:+.3f} m   bin {base:+.3f} m   {arrow}")
+        sec, ring = (int(v) for v in k.split(","))
+        print(f"    {sec * step:>3}-{(sec + 1) * step:<3} deg  "
+              f"{ring * 0.2:.1f}-{(ring + 1) * 0.2:.1f} m out  "
+              f"{kept[k]:+.3f} m   grid {base:+.3f} m   {arrow}")
     if thin:
-        print(f"  skipped sectors passed through too quickly: "
-              f"{', '.join(f'{t * step}-{(t + 1) * step}' for t in thin)}")
+        print(f"  skipped {len(thin)} cells passed through too quickly")
     print(f"  furthest the arm reached: {reach:.3f} m"
           + ("  (enforced)" if args.limit_reach else "  (recorded only)"))
 

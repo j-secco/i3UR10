@@ -8,7 +8,7 @@ import tempfile
 sys.path.insert(0, "src")
 sys.path.insert(0, "motion_lab")
 
-from envelope import FLOOR_SECTORS, Dome, Envelope, Zone
+from envelope import FLOOR_SECTORS, RING_WIDTH_M, Dome, Envelope, Zone
 
 failures = []
 STEP = 360 // FLOOR_SECTORS
@@ -27,14 +27,16 @@ def at(deg, r=0.9):
 
 # A front zone swept across three sectors, TIGHTER at one end than the other --
 # the case that a single-floor zone could not express.
-LAST = str(FLOOR_SECTORS - 1)   # the sector just below 0 deg, whatever the resolution
-front = Zone(name="front", floors={"0": 0.30, "1": 0.10, LAST: 0.05})
+RING = int(0.9 // RING_WIDTH_M)          # the ring the probe points sit in
+LAST = FLOOR_SECTORS - 1
+front = Zone(name="front", floors={f"0,{RING}": 0.30, f"1,{RING}": 0.10,
+                                  f"{LAST},{RING}": 0.05})
 dome.zones = [front]
 print(f"zone 'front' covers sectors {front.sectors} with varying floor")
 
 # 1. Each sector keeps its own limit.
-for sec, expect in (("0", 0.30), ("1", 0.10), (LAST, 0.05)):
-    x, y = at(int(sec) * STEP + STEP / 2)
+for sec, expect in ((0, 0.30), (1, 0.10), (LAST, 0.05)):
+    x, y = at(sec * STEP + STEP / 2)
     if abs(dome.floor_at(x, y) - expect) > 1e-9:
         failures.append(f"sector {sec} floor {dome.floor_at(x, y)}, expected {expect}")
         break
@@ -59,7 +61,7 @@ else:
 # 4. A zone overrides the inferred bin in its own sectors, in both directions:
 #    a bin built from a handful of poses can be spuriously high, and careful
 #    re-teaching has to be able to correct it.
-dome.zones = [Zone(name="corrected", floors={"6": -0.90})]
+dome.zones = [Zone(name="corrected", floors={f"6,{RING}": -0.90})]
 lx, ly = at(6 * STEP + STEP / 2)
 if abs(dome.floor_at(lx, ly) + 0.90) < 1e-6:
     print("OK  a zone overrides the inferred bin, downward as well as up")
@@ -67,7 +69,8 @@ else:
     failures.append(f"zone did not override the bin: {dome.floor_at(lx, ly)}")
 
 # 4b. Overlapping zones: the tighter one wins.
-dome.zones = [Zone(name="a", floors={"6": -0.50}), Zone(name="b", floors={"6": 0.10})]
+dome.zones = [Zone(name="a", floors={f"6,{RING}": -0.50}),
+              Zone(name="b", floors={f"6,{RING}": 0.10})]
 if abs(dome.floor_at(lx, ly) - 0.10) < 1e-9:
     print("OK  where zones overlap, the tighter wins")
 else:
@@ -90,7 +93,7 @@ else:
     failures.append("sector membership across 0 deg is wrong")
 
 # 7. Reach cap applies only where the zone covers.
-dome.zones = [Zone(name="tight", floors={"0": -1.0}, r_max=0.5)]
+dome.zones = [Zone(name="tight", floors={f"0,{RING}": -1.0}, r_max=0.5)]
 if dome.outside([*at(15), 0.3]) is not None and dome.outside([*at(180), 0.3]) is None:
     print("OK  zone reach cap stays inside its own sectors")
 else:
@@ -99,15 +102,15 @@ else:
 # 8. Round-trip, including unlimited reach that JSON cannot represent.
 env = Envelope.from_samples([[0.0] * 6])
 env.dome = dome
-env.dome.zones = [front, Zone(name="tight", floors={"0": -1.0}, r_max=0.5)]
+env.dome.zones = [front, Zone(name="tight", floors={f"0,{RING}": -1.0}, r_max=0.5)]
 with tempfile.TemporaryDirectory() as t:
     p = os.path.join(t, "e.json")
     env.save(p)
     zs = {z.name: z for z in Envelope.load(p).dome.zones}
     if (len(zs) == 2 and zs["front"].r_max == math.inf
             and abs(zs["tight"].r_max - 0.5) < 1e-9
-            and abs(zs["front"].floors["0"] - 0.30) < 1e-9
-            and zs["front"].sectors == sorted([0, 1, FLOOR_SECTORS - 1])):
+            and abs(zs["front"].floors[f"0,{RING}"] - 0.30) < 1e-9
+            and zs["front"].sectors == sorted([0, 1, LAST])):
         print("OK  zones round-trip with their per-sector profile intact")
     else:
         failures.append(f"zones did not round-trip: {zs}")
