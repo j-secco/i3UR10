@@ -34,6 +34,93 @@ DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "workspace_envelope.json")
 
 
+def _wrap(angle: float) -> float:
+    """Map an angle into (-pi, pi]."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def spherical(point: Sequence[float]) -> tuple:
+    """(radius, azimuth, elevation) of a point about the robot base origin.
+
+    azimuth is the compass bearing in the base XY plane; elevation is the
+    angle above (positive) or below (negative) that plane.
+    """
+    x, y, z = point
+    r = math.sqrt(x * x + y * y + z * z)
+    if r < 1e-9:
+        return 0.0, 0.0, 0.0
+    return r, math.atan2(y, x), math.asin(max(-1.0, min(1.0, z / r)))
+
+
+@dataclass
+class Dome:
+    """The reachable region as a spherical shell sector about the base.
+
+    An arm's workspace is a dome, not a box. Describing it as "this far out,
+    this high, this low, through this arc" is both a far tighter fit than six
+    flat planes and the way an operator actually thinks about it: a box drawn
+    around a swung arm contains large corners the arm can never occupy, and
+    declaring those safe is exactly the wrong error.
+    """
+    r_min: float = 0.0
+    r_max: float = 0.0
+    elevation_min: float = 0.0
+    elevation_max: float = 0.0
+    azimuth_center: float = 0.0
+    azimuth_lo: float = 0.0      # signed offset from centre, radians
+    azimuth_hi: float = 0.0
+    z_floor: float = 0.0
+
+    @classmethod
+    def from_points(cls, points: Sequence[Sequence[float]]) -> "Dome":
+        rs, els, azs, zs = [], [], [], []
+        for p in points:
+            r, az, el = spherical(p)
+            rs.append(r); azs.append(az); els.append(el); zs.append(p[2])
+        # Circular mean, so a sector spanning the +/-pi seam is handled
+        # without the min/max of raw angles collapsing to the whole circle.
+        cx = sum(math.cos(a) for a in azs) / len(azs)
+        cy = sum(math.sin(a) for a in azs) / len(azs)
+        centre = math.atan2(cy, cx)
+        deltas = [_wrap(a - centre) for a in azs]
+        return cls(r_min=min(rs), r_max=max(rs),
+                   elevation_min=min(els), elevation_max=max(els),
+                   azimuth_center=centre,
+                   azimuth_lo=min(deltas), azimuth_hi=max(deltas),
+                   z_floor=min(zs))
+
+    def outside(self, point: Sequence[float], tol_m: float = 0.01,
+                tol_rad: float = 0.02) -> Optional[str]:
+        r, az, el = spherical(point)
+        if r < self.r_min - tol_m:
+            return f"radius {r:.3f} m, inside the taught {self.r_min:.3f} m"
+        if r > self.r_max + tol_m:
+            return f"radius {r:.3f} m, beyond the taught {self.r_max:.3f} m"
+        if point[2] < self.z_floor - tol_m:
+            return f"z {point[2]:.3f} m, below the taught floor {self.z_floor:.3f} m"
+        if not (self.elevation_min - tol_rad <= el <= self.elevation_max + tol_rad):
+            return (f"elevation {math.degrees(el):.1f} deg, taught "
+                    f"{math.degrees(self.elevation_min):.1f} to "
+                    f"{math.degrees(self.elevation_max):.1f}")
+        d = _wrap(az - self.azimuth_center)
+        if not (self.azimuth_lo - tol_rad <= d <= self.azimuth_hi + tol_rad):
+            return (f"bearing {math.degrees(az):.1f} deg, taught arc "
+                    f"{math.degrees(self.azimuth_center + self.azimuth_lo):.1f} to "
+                    f"{math.degrees(self.azimuth_center + self.azimuth_hi):.1f}")
+        return None
+
+    def describe(self) -> List[str]:
+        return [
+            f"  reach      {self.r_min:.3f} to {self.r_max:.3f} m from the base",
+            f"  bearing    {math.degrees(self.azimuth_center + self.azimuth_lo):>7.1f} to "
+            f"{math.degrees(self.azimuth_center + self.azimuth_hi):>7.1f} deg "
+            f"(arc {math.degrees(self.azimuth_hi - self.azimuth_lo):.0f} deg)",
+            f"  elevation  {math.degrees(self.elevation_min):>7.1f} to "
+            f"{math.degrees(self.elevation_max):>7.1f} deg about the base plane",
+            f"  floor      {self.z_floor:.3f} m",
+        ]
+
+
 @dataclass
 class Violation:
     kind: str          # "joint" | "tcp" | "elbow"
@@ -57,6 +144,18 @@ class Envelope:
     samples: int = 0
     marks: List[Dict] = field(default_factory=list)
     note: str = ""
+
+    # Spherical sector about the base. This is the primary check for the TCP:
+    # it fits an arm's real workspace far more tightly than the boxes, which
+    # are retained mainly because the pendant's safety planes are planes.
+    #
+    # Deliberately NOT applied to the elbow. The elbow tracks close to the
+    # base axis, where bearing and elevation are ill-conditioned: a few
+    # centimetres of real movement swings elevation by tens of degrees, so a
+    # dome fitted to it rejects poses that were plainly taught. The elbow is
+    # bounded by its box instead, which is well behaved over its smaller
+    # range of motion.
+    dome: Optional[Dome] = None
 
     # Joint ranges are SHRUNK by this much: the operator guided the arm to
     # where it was safe, not past it, so the taught extreme needs headroom for
@@ -96,6 +195,7 @@ class Envelope:
             tcp_max=tcps.max(axis=0).tolist(),
             elbow_min=elbows.min(axis=0).tolist(),
             elbow_max=elbows.max(axis=0).tolist(),
+            dome=Dome.from_points(tcps.tolist()),
             samples=len(joint_samples),
             note=note,
         )
@@ -119,10 +219,18 @@ class Envelope:
                                  list(joints))
 
         tol = self.cartesian_tolerance_m
-        for label, point, lo_b, hi_b in (
-                ("tcp", tcp_xyz(joints), self.tcp_min, self.tcp_max),
-                ("elbow", list(joint_origins(joints)[ELBOW_INDEX]),
-                 self.elbow_min, self.elbow_max)):
+        tcp = tcp_xyz(joints)
+        elbow = list(joint_origins(joints)[ELBOW_INDEX])
+
+        # The dome is the tighter and more meaningful test, so it runs first
+        # and its message is the one worth reading.
+        if self.dome is not None:
+            why = self.dome.outside(tcp, tol_m=tol)
+            if why is not None:
+                return Violation("tcp", why, list(joints))
+
+        for label, point, lo_b, hi_b in (("tcp", tcp, self.tcp_min, self.tcp_max),
+                                         ("elbow", elbow, self.elbow_min, self.elbow_max)):
             for axis, name in enumerate("xyz"):
                 if not (lo_b[axis] - tol <= point[axis] <= hi_b[axis] + tol):
                     return Violation(label,
@@ -158,7 +266,13 @@ class Envelope:
     @classmethod
     def load(cls, path: str = DEFAULT_PATH) -> "Envelope":
         with open(path) as fh:
-            return cls(**json.load(fh))
+            data = json.load(fh)
+        # asdict() flattens the nested domes to plain dicts; rebuild them or
+        # the guard silently degrades to box-only checking.
+        data.pop("elbow_dome", None)   # dropped: ill-conditioned near the base
+        if isinstance(data.get("dome"), dict):
+            data["dome"] = Dome(**data["dome"])
+        return cls(**data)
 
     @classmethod
     def load_if_present(cls, path: str = DEFAULT_PATH) -> Optional["Envelope"]:
@@ -188,6 +302,9 @@ class Envelope:
             lo, hi = math.degrees(self.joint_min[i]), math.degrees(self.joint_max[i])
             lines.append(f"  {'J' + str(i + 1):>8} {lo:>9.1f} {hi:>9.1f} {hi - lo:>8.1f}")
 
+        if self.dome is not None:
+            lines.append("\nReachable dome about the base (the primary check):")
+            lines.extend(self.dome.describe())
         lines.append("\nCartesian extent (metres), for siting safety planes:")
         for label, lo_b, hi_b in (("tcp", self.tcp_min, self.tcp_max),
                                   ("elbow", self.elbow_min, self.elbow_max)):
