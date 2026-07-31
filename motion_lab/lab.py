@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from control.pose_guard import validate_path  # noqa: E402  (path set above)
 
+from envelope import Envelope  # noqa: E402
 from telemetry import Recorder, Trace, read_once  # noqa: E402
 
 PRIMARY_PORT = 30001
@@ -101,6 +102,15 @@ class Lab:
         violation = validate_path(waypoints, closed=closed)
         if violation is not None:
             raise LabError(f"self-collision: {violation.describe()}")
+
+        # The arm hitting itself is not the only way to break something. If a
+        # workspace has been taught, honour it -- the operator knows about the
+        # table and pose_guard does not.
+        env = Envelope.load_if_present()
+        if env is not None:
+            outside = env.validate_path(waypoints, closed=closed)
+            if outside is not None:
+                raise LabError(outside.describe())
 
     # ------------------------------------------------------------ execution
 

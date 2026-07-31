@@ -19,7 +19,36 @@ does not depend on who is listening.
 | `telemetry.py` | Records the realtime stream (port 30003). Field offsets verified against this controller. Detects **mid-motion stalls** — intervals where every joint is below 0.02 rad/s while motion is still ongoing. That is what a program boundary or a skipped blend looks like in the data. |
 | `blend.py` | Enforces the URScript overlap rule `r[i] + r[i+1] <= tcp_leg_length`. Blend radii are in **metres of TCP path**, even for `movej`. Violations mean the controller **skips the waypoint entirely**, not that it blends less. `suggest_radii()` computes the largest legal radii for a path. |
 | `lab.py` | Sends a URScript program, records the run, reports it. Also builds the three program shapes (persistent loop, one-shot, per-waypoint) so experiments can *measure* the cost of program boundaries instead of assuming it. |
+| `teach.py` | Hand-guide the arm to record a safe workspace. **Read-only by default** — you hold the pendant Freedrive button, this only watches telemetry. |
+| `envelope.py` | The taught region: per-joint limits, TCP box, elbow box. Checks paths against it and prints the numbers to enter on the pendant. |
 | `gripper.py` | XL330-M288-T driver (current-based position control). Independent of the arm. |
+
+## Teaching the safe workspace
+
+`pose_guard` checks the arm against itself and knows nothing about your table.
+Teaching fixes that:
+
+```bash
+venv/bin/python motion_lab/teach.py          # hold pendant Freedrive, guide the arm
+venv/bin/python motion_lab/teach.py --freedrive 120   # software freedrive instead
+```
+
+Once `workspace_envelope.json` exists, every experiment is checked against it
+automatically — `Lab.check_waypoints()` refuses any path that leaves the
+region, including the interpolated poses between waypoints.
+
+**This is not a safety function.** It is Python on the control PC: it can
+crash, lag, or be skipped, and nothing certifies it. The real fence is the
+PolyScope safety configuration, enforced by the robot's separate safety
+processor. `teach.py` prints its results formatted for that screen, so the
+workflow is: teach → read the numbers → enter them under Installation →
+Safety → Joint Limits and safety planes → and keep the envelope as the
+tighter software check in front of it.
+
+**It cannot represent a hole.** The result is a bounding box per quantity, so
+tracing the edges of a region allows the whole box, including parts never
+visited. Anything inside the box that the arm must avoid needs a pendant
+safety plane, not this.
 | `experiments/` | One file per question. Each states what it measures and whether it moves the robot. |
 
 ## Experiments
