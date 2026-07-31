@@ -19,7 +19,24 @@ does not depend on who is listening.
 | `telemetry.py` | Records the realtime stream (port 30003). Field offsets verified against this controller. Detects **mid-motion stalls** — intervals where every joint is below 0.02 rad/s while motion is still ongoing. That is what a program boundary or a skipped blend looks like in the data. |
 | `blend.py` | Enforces the URScript overlap rule `r[i] + r[i+1] <= tcp_leg_length`. Blend radii are in **metres of TCP path**, even for `movej`. Violations mean the controller **skips the waypoint entirely**, not that it blends less. `suggest_radii()` computes the largest legal radii for a path. |
 | `lab.py` | Sends a URScript program, records the run, reports it. Also builds the three program shapes (persistent loop, one-shot, per-waypoint) so experiments can *measure* the cost of program boundaries instead of assuming it. |
+| `gripper.py` | XL330-M288-T driver (current-based position control). Independent of the arm. |
 | `experiments/` | One file per question. Each states what it measures and whether it moves the robot. |
+
+## Experiments
+
+| # | Moves robot | Question |
+|---|---|---|
+| `exp01_audit_blends.py` | no | Which demos contain waypoints the controller will silently skip? |
+| `exp02_blend_ab.py` | **yes** | Does repairing the blend geometry actually remove mid-motion stalls? Speeds are held identical so blending is the only variable. |
+| `exp03_speed_ramp.py` | **yes** | Where is the real speed ceiling? Compares commanded against achieved joint speed at rising multipliers and stops when they stop tracking. |
+
+### Joint limits worth knowing before reading exp03
+
+The UR10's own maxima are **120 deg/s (2.09 rad/s) on the base and shoulder**
+and **180 deg/s (3.14 rad/s) on elbow and wrists**. A choreography that sweeps
+J1 therefore hits a hardware wall at 2.09 rad/s no matter what the safety
+configuration allows. When a ramp stops tracking, check which joint is
+leading the motion before assuming the safety limiter is responsible.
 
 ## Safety model
 
