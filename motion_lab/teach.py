@@ -53,6 +53,14 @@ PRIMARY_PORT = 30001
 DASHBOARD_PORT = 29999
 MAX_FREEDRIVE_SECONDS = 300
 
+# UR10 joints travel +/-360 degrees. Hand-guiding the arm round the base
+# several times in the same direction winds J1 up without anything physical
+# stopping it, and once a joint is past its limit the robot sits in Recovery
+# Mode -- which a power cycle does not clear, because the position persists.
+# Warn well before that, and again at the end.
+JOINT_LIMIT_DEG = 360.0
+JOINT_WARN_DEG = 300.0
+
 # A checklist for --guided. Between them these six poses pin every face of the
 # box; skipping one leaves that face defined by wherever the arm happened to
 # be, which is how a taught envelope ends up quietly wrong.
@@ -122,10 +130,41 @@ def current_pose(rec, timeout: float = 3.0):
     return None
 
 
+def wound_joints(sample, threshold=JOINT_WARN_DEG):
+    """Joints approaching their +/-360 degree travel limit."""
+    return [(i + 1, math.degrees(v)) for i, v in enumerate(sample.q)
+            if abs(math.degrees(v)) > threshold]
+
+
 def live_line(samples):
-    q = samples[-1].q
-    return ("  J " + " ".join(f"{math.degrees(v):7.1f}" for v in q) +
-            f"   tcp z {samples[-1].tcp[2]:.3f} m   {len(samples)} samples")
+    s = samples[-1]
+    warn = ""
+    for j, d in wound_joints(s):
+        warn += f"   !! J{j} {d:+.0f} deg, limit {JOINT_LIMIT_DEG:.0f}"
+    return ("  J " + " ".join(f"{math.degrees(v):7.1f}" for v in s.q) +
+            f"   tcp z {s.tcp[2]:.3f} m   {len(samples)} samples" + warn)
+
+
+def check_winding(sample, when):
+    """Refuse to start, or complain at the end, if a joint is wound up.
+
+    Sweeping the arm around the base repeatedly is the natural way to teach a
+    workspace and the natural way to wind J1 past its travel limit. The cost
+    of missing it is Recovery Mode and hand-unwinding nearly two turns, so it
+    is worth saying loudly.
+    """
+    bad = wound_joints(sample)
+    if not bad:
+        return False
+    print(f"\n!! {when}:")
+    for j, d in bad:
+        turns = (abs(d) - JOINT_LIMIT_DEG) / 360.0
+        past = f", {turns:.2f} turns PAST its limit" if abs(d) > JOINT_LIMIT_DEG else ""
+        print(f"!!   J{j} is at {d:+.0f} deg (limit +/-{JOINT_LIMIT_DEG:.0f}){past}")
+    print("!! Unwind it before continuing -- past the limit the robot enters Recovery")
+    print("!! Mode, which a restart does not clear, and it has to be jogged back by")
+    print("!! hand from the pendant. Sweep back the way you came rather than round again.")
+    return True
 
 
 
@@ -339,8 +378,11 @@ def main():
         raise SystemExit("recover the robot before teaching")
     if "RUNNING" not in mode:
         raise SystemExit("power on and release brakes before teaching")
-    if read_once(args.host) is None:
+    first = read_once(args.host)
+    if first is None:
         raise SystemExit("no telemetry; is another client holding port 30003?")
+    if check_winding(first, "before starting, a joint is already wound up"):
+        raise SystemExit("unwind it first, or teaching will push it further")
 
     if args.obstacle:
         print("\nRead-only: hold the pendant Freedrive button to move the arm.")
@@ -461,6 +503,8 @@ def main():
 
     if rec.error:
         print(f"telemetry warning: {rec.error}")
+    if rec.trace.samples:
+        check_winding(rec.trace.samples[-1], "finished, but a joint is wound up")
 
     swept = [list(s.q) for s in rec.trace.samples]
     if from_marks:
