@@ -72,6 +72,12 @@ class Envelope:
     # keeps that check from firing on its own discretisation.
     cartesian_tolerance_m: float = 0.01
 
+    # Joints (1-6) exempt from the per-joint range check, bounded by the
+    # Cartesian extents alone. Use when a joint was deliberately held still
+    # during teaching but must still be free to move -- typically the wrists,
+    # whose rotation the TCP and elbow boxes already constrain.
+    free_joints: List[int] = field(default_factory=list)
+
     # ------------------------------------------------------------- building
 
     @classmethod
@@ -99,6 +105,8 @@ class Envelope:
     def contains(self, joints: Sequence[float]) -> Optional[Violation]:
         """None if this pose is safely inside the taught region."""
         for i, q in enumerate(joints):
+            if (i + 1) in self.free_joints:
+                continue
             lo_t, hi_t = self.joint_min[i], self.joint_max[i]
             # Never let the margin invert a narrow range. A joint that was
             # taught as fixed keeps a zero-width window, so any motion on it
@@ -161,6 +169,14 @@ class Envelope:
 
     # ------------------------------------------------------------ reporting
 
+    def narrow_joints(self, threshold_rad: float = 0.10) -> List[int]:
+        """Joints whose taught span is so small that the guard will treat them
+        as fixed. Marking corners with the wrist held in one orientation is the
+        usual cause, and it silently forbids every choreography that rotates
+        it -- so this is worth surfacing rather than discovering later."""
+        return [i + 1 for i in range(6)
+                if (self.joint_max[i] - self.joint_min[i]) < threshold_rad]
+
     def report(self) -> str:
         lines = [f"=== taught envelope ({self.samples} samples) ==="]
         if self.note:
@@ -185,6 +201,15 @@ class Envelope:
             for m in self.marks:
                 deg = [round(math.degrees(q), 1) for q in m["joints"]]
                 lines.append(f"  {m['name']:<20} {deg}")
+
+        narrow = self.narrow_joints()
+        if narrow:
+            names = ", ".join(f"J{j}" for j in narrow)
+            lines.append(f"\n!! {names} barely moved during teaching, so the guard will")
+            lines.append("!! treat them as FIXED and refuse any path that rotates them.")
+            lines.append("!! If a demo needs those joints, teach again while moving them,")
+            lines.append("!! or re-run with --free-joints to bound them by Cartesian")
+            lines.append("!! extent alone.")
 
         lines.append("\nA safety plane placed at a taught extreme leaves no room for "
                      "\nblend overshoot. Site planes a little OUTSIDE these numbers, "

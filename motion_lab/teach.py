@@ -50,6 +50,18 @@ PRIMARY_PORT = 30001
 DASHBOARD_PORT = 29999
 MAX_FREEDRIVE_SECONDS = 300
 
+# A checklist for --guided. Between them these six poses pin every face of the
+# box; skipping one leaves that face defined by wherever the arm happened to
+# be, which is how a taught envelope ends up quietly wrong.
+GUIDED_STEPS = [
+    ("left", "swing the arm as far LEFT as it should ever go"),
+    ("right", "now as far RIGHT as it should ever go"),
+    ("forward", "reach as far FORWARD / away from the base as it should go"),
+    ("near", "bring it back as CLOSE to the base as it should go"),
+    ("high", "raise the tool as HIGH as it should ever go"),
+    ("low", "lower the tool as LOW as it should go -- mind the table"),
+]
+
 
 def dashboard(host, cmd):
     with socket.create_connection((host, DASHBOARD_PORT), timeout=4) as s:
@@ -94,7 +106,18 @@ def main():
     ap.add_argument("--note", default="")
     ap.add_argument("--append", action="store_true",
                     help="widen an existing envelope instead of replacing it")
+    ap.add_argument("--guided", action="store_true",
+                    help="walk a checklist of extremes, marking each one")
+    ap.add_argument("--from-marks", action="store_true",
+                    help="build the envelope from marked poses only, ignoring "
+                         "the motion between them (implied by --guided)")
+    ap.add_argument("--free-joints", default="",
+                    help="comma-separated joints exempt from the range check, "
+                         "e.g. 4,5,6 when the wrists were held still")
     args = ap.parse_args()
+
+    from_marks = args.from_marks or args.guided
+    free_joints = [int(j) for j in args.free_joints.split(",") if j.strip()]
 
     if args.freedrive is not None and not (0 < args.freedrive <= MAX_FREEDRIVE_SECONDS):
         raise SystemExit(f"--freedrive must be in (0, {MAX_FREEDRIVE_SECONDS}] seconds")
@@ -135,7 +158,38 @@ def main():
         printer = threading.Thread(target=show, daemon=True)
         printer.start()
         try:
-            if args.duration is not None:
+            if args.guided:
+                print("\nGuided teaching. Move the arm to each pose, then press Enter.")
+                print("Type 's' + Enter to skip one you do not want to bound.\n")
+                for name, prompt in GUIDED_STEPS:
+                    while True:
+                        answer = input(f"  [{name}] {prompt} ... ").strip().lower()
+                        if answer == "s":
+                            print(f"    skipped {name}")
+                            break
+                        if not rec.trace.samples:
+                            print("    no telemetry yet, wait a moment")
+                            continue
+                        s = rec.trace.samples[-1]
+                        marks.append({"name": name, "joints": list(s.q),
+                                      "tcp": list(s.tcp)})
+                        print(f"    recorded {name}: tcp "
+                              f"({s.tcp[0]:.3f}, {s.tcp[1]:.3f}, {s.tcp[2]:.3f}) m")
+                        break
+                print("\nChecklist done. Mark any extra poses by name, or 'q' to finish.")
+                while True:
+                    try:
+                        line = input().strip()
+                    except EOFError:
+                        break
+                    if line.lower() in ("q", "quit", "done"):
+                        break
+                    if rec.trace.samples:
+                        s = rec.trace.samples[-1]
+                        marks.append({"name": line or f"extra{len(marks) + 1}",
+                                      "joints": list(s.q), "tcp": list(s.tcp)})
+                        print(f"  marked '{marks[-1]['name']}'")
+            elif args.duration is not None:
                 deadline = time.time() + args.duration
                 while time.time() < deadline:
                     time.sleep(0.2)
@@ -169,13 +223,38 @@ def main():
 
     if rec.error:
         print(f"telemetry warning: {rec.error}")
-    samples = [list(s.q) for s in rec.trace.samples]
-    if len(samples) < 50:
-        raise SystemExit(f"only {len(samples)} samples; move the arm through the "
-                         f"region for longer")
 
-    env = Envelope.from_samples(samples, note=args.note)
+    swept = [list(s.q) for s in rec.trace.samples]
+    if from_marks:
+        if len(marks) < 2:
+            raise SystemExit(f"only {len(marks)} marks; at least 2 are needed to "
+                             f"bound a region")
+        source = [m["joints"] for m in marks]
+        print(f"\nbuilding the envelope from {len(marks)} marked poses "
+              f"(motion between them ignored)")
+    else:
+        if len(swept) < 50:
+            raise SystemExit(f"only {len(swept)} samples; move the arm through the "
+                             f"region for longer")
+        source = swept
+        print(f"\nbuilding the envelope from {len(swept)} swept samples")
+
+    env = Envelope.from_samples(source, note=args.note)
     env.marks = marks
+    env.free_joints = free_joints
+
+    # Show what the other choice would have given, so the difference between
+    # "where I deliberately stopped" and "everywhere I happened to pass
+    # through" is visible rather than assumed.
+    if from_marks and len(swept) >= 50:
+        alt = Envelope.from_samples(swept)
+        print("  for comparison, the full swept motion would have given:")
+        for i in range(6):
+            m_span = math.degrees(env.joint_max[i] - env.joint_min[i])
+            s_span = math.degrees(alt.joint_max[i] - alt.joint_min[i])
+            if s_span - m_span > 1.0:
+                print(f"    J{i + 1}: {m_span:.1f} deg from marks vs "
+                      f"{s_span:.1f} deg swept")
 
     if args.append:
         old = Envelope.load_if_present(args.out)
