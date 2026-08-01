@@ -59,6 +59,13 @@ class WebSocketController:
         # Why the last demo program was refused (None = last program was accepted)
         self.last_program_error: Optional[str] = None
 
+        # The pose demos build their offsets around. Set by the UI from the
+        # saved home, and kept current when the operator re-saves it, so an
+        # unsafe program can be shrunk towards home rather than refused.
+        # None means no shrinking is possible and unsafe programs are refused.
+        self.demo_home: Optional[List[float]] = None
+        self.last_amplitude_scale: float = 1.0
+
         # Logging
         self.logger = logging.getLogger(self.__class__.__name__)
         
@@ -195,30 +202,57 @@ class WebSocketController:
         command = f"movej({joints_str}, a={acceleration}, v={speed}, r={blend})"
         return self.send_command(command)
     
-    def _guard_program_path(self, waypoints, closed: bool) -> bool:
-        """Refuse to send a demo program whose joint-space path self-collides.
+    def _guard_program_path(self, waypoints, closed: bool):
+        """Make a demo program safe to send, or refuse it.
 
         Validates every waypoint AND the interpolated poses between them
         against the calibrated capsule model in control.pose_guard. Demos
         apply fixed deltas relative to the user-savable home pose, so a
         re-saved home can silently push choreography targets into
         self-collision (the cause of every protective stop in
-        logs/safety_events.log). Imported lazily to avoid a
-        communication -> control circular import."""
+        logs/safety_events.log).
+
+        A refused demo is a button that does nothing, which helps no one, so
+        an unsafe program is first shrunk about `demo_home` to the largest
+        amplitude that clears the guard. The same choreography performed
+        smaller beats no choreography at all. Only when even a quarter-size
+        version is unsafe is the program refused outright.
+
+        Returns (waypoints_to_send, ok). The waypoints come back because they
+        may have been scaled; callers must build the program from what is
+        returned, not from what they passed in.
+
+        Imported lazily to avoid a communication -> control circular import.
+        """
         try:
-            from control.pose_guard import validate_path
+            from control import amplitude
         except Exception as exc:
             self.logger.debug("pose_guard unavailable, skipping path validation: %s", exc)
-            return True
-        violation = validate_path(waypoints, closed=closed)
-        if violation is None:
+            return waypoints, True
+
+        fitted, scale = amplitude.fit(waypoints, self.demo_home, closed=closed)
+        if fitted is not None and scale >= 1.0:
             self.last_program_error = None
-            return True
-        self.last_program_error = f"self-collision risk: {violation.describe()}"
+            self.last_amplitude_scale = 1.0
+            return fitted, True
+        if fitted is not None:
+            self.last_amplitude_scale = scale
+            self.last_program_error = None
+            self.logger.warning(
+                "Demo %s. Straighten the elbow at Home to recover full size.",
+                amplitude.describe(scale))
+            return fitted, True
+
+        self.last_amplitude_scale = 0.0
+        from control.pose_guard import validate_path
+        violation = validate_path(waypoints, closed=closed)
+        self.last_program_error = (
+            f"self-collision risk: {violation.describe()}" if violation
+            else "self-collision risk")
         self.logger.error(
             "REFUSED unsafe program (%s). Re-save Home with a straighter elbow "
             "or reduce the demo amplitude.", self.last_program_error)
-        return False
+        return None, False
 
     def move_joint_program(self, waypoints_with_params) -> bool:
         """Send a list of [j1..j6, v, a, r] waypoints as ONE URScript program.
@@ -227,7 +261,9 @@ class WebSocketController:
         between sub-paths)."""
         if not waypoints_with_params:
             return False
-        if not self._guard_program_path(waypoints_with_params, closed=False):
+        waypoints_with_params, ok = self._guard_program_path(
+            waypoints_with_params, closed=False)
+        if not ok:
             return False
         lines = ["def jsecco_demo_path():"]
         for wp in waypoints_with_params:
@@ -251,7 +287,9 @@ class WebSocketController:
         terminates). Use stop_motion() to abort."""
         if not waypoints_with_params:
             return False
-        if not self._guard_program_path(waypoints_with_params, closed=True):
+        waypoints_with_params, ok = self._guard_program_path(
+            waypoints_with_params, closed=True)
+        if not ok:
             return False
         lines = ["def jsecco_demo_loop():"]
         lines.append("  while True:")
@@ -295,7 +333,8 @@ class WebSocketController:
         """
         if not path:
             return False
-        if not self._guard_program_path(path, closed=False):
+        path, ok = self._guard_program_path(path, closed=False)
+        if not ok:
             return False
         lines = ["def jsecco_demo_path():"]
         last = len(path) - 1

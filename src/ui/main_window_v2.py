@@ -984,6 +984,13 @@ class MainWindowV2(QMainWindow):
 
         status_callback = self._make_status_callback()
 
+        # Demos build their waypoints as offsets from this pose, and the
+        # controller shrinks a program towards it when the choreography would
+        # otherwise self-collide. Set here, at the one place the home is handed
+        # to a demo, so the two can never be told different things.
+        self.jog_controller.websocket_controller.demo_home = (
+            list(self._saved_home_joints) if self._saved_home_joints else None)
+
         try:
             runner = cls(
                 self.jog_controller.websocket_controller,
