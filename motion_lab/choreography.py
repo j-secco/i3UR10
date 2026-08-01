@@ -196,8 +196,14 @@ class DemoReport:
     v_possible: float
     limited_by: str
     accel_to_ceiling: float
+    # Clearance to the nearest measured solid, as the gap between the arm's
+    # SURFACE and the solid. The obstacle model works in margin-inclusive
+    # numbers, which go negative while there is still real air, so they are
+    # converted here: a number printed next to the word "clearance" has to
+    # mean what a tape measure would read.
     clearance_m: Optional[float] = None
     clearance_solid: str = ""
+    clearance_margin: float = 0.0
     self_collision: Optional[str] = None
     notes: List[str] = field(default_factory=list)
 
@@ -246,7 +252,11 @@ def analyse(name: str, waypoints: Sequence[Sequence[float]],
             if got and (worst is None or got[0] < worst[0]):
                 worst = got
         if worst:
-            rep.clearance_m, rep.clearance_solid = worst[0], worst[1]
+            margin = max((s.margin for s in obstacles.solids
+                          if s.name == worst[1]), default=0.0)
+            rep.clearance_solid = worst[1]
+            rep.clearance_margin = margin
+            rep.clearance_m = worst[0] + margin        # surface to surface
 
     short = [l for l in legs if l.d_lead < GEOMETRY_LIMIT_RAD]
     if short:
@@ -279,8 +289,12 @@ def describe(rep: DemoReport) -> str:
         L.append(f"  no acceleration fixes this: the longest run is only "
                  f"{max((r.distance for r in rep.runs if r.joint == rep.lead_joint), default=0):.2f} rad")
     if rep.clearance_m is not None:
-        L.append(f"  clearance      {rep.clearance_m * 1000:.0f} mm to the "
-                 f"{rep.clearance_solid}")
+        inside = rep.clearance_m < rep.clearance_margin
+        L.append(f"  clearance      {rep.clearance_m * 1000:.0f} mm of air to "
+                 f"the {rep.clearance_solid}"
+                 + (f"  (inside the {rep.clearance_margin * 1000:.0f} mm margin)"
+                    if inside and rep.clearance_m >= 0 else "")
+                 + ("  CONTACT" if rep.clearance_m < 0 else ""))
     if rep.self_collision:
         L.append(f"  SELF-COLLISION {rep.self_collision}")
     for n in rep.notes:

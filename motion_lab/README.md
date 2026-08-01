@@ -25,6 +25,10 @@ does not depend on who is listening.
 | `pointer.py` | Click a point in a 3D view of the cell and send the tool there. Solves IK, runs every guard, then reports the model's target against the position the **robot** says it reached. |
 | `../src/control/ur_kinematics.py` | Closed-form UR10 inverse kinematics, all 8 branches. Shares its forward model with `pose_guard`, so FK and IK cannot drift apart. |
 | `gripper.py` | XL330-M288-T driver (current-based position control). Independent of the arm. |
+| `demos.py` | Captures every production demo's program without a robot and reports it. The one capture harness; the experiments use it too. |
+| `choreography.py` | Why a demo is as fast as it is: the `sqrt(a*d)` analysis, blend chaining, and a speed/accel/geometry verdict per demo. |
+| `find_home.py` | The smallest change to the saved home that makes the whole catalogue geometrically legal. |
+| `../src/control/amplitude.py` | Production: shrinks a demo that would self-collide instead of refusing it. |
 | `experiments/` | One file per question. Each states what it measures and whether it moves the robot. |
 
 ## Teaching the safe workspace
@@ -88,6 +92,59 @@ constrained at all. Replayed afterwards, its eight positions put the tool
 anywhere from 0.39 m to 0.88 m from the base. **Optimising a proxy for the
 thing you care about is not the same as constraining it.** Cartesian intent
 needs a Cartesian solve, which is what `pointer.py` does.
+
+## Why a demo is as fast as it is
+
+```bash
+venv/bin/python motion_lab/demos.py            # the whole catalogue
+venv/bin/python motion_lab/demos.py --blends   # blend legality too
+```
+
+A joint that starts and stops inside a leg of length `d`, accelerating at
+`a`, peaks at **`sqrt(a*d)`** no matter what speed is commanded. That single
+fact explains most of this project's history: raising `joint_speed` did
+nothing for months, and raising `joint_acceleration` unlocked Sprint
+immediately. Each leg is one of three things, and the fix differs completely:
+
+| verdict | meaning | what to do |
+|---|---|---|
+| speed | the leg is long enough to reach the commanded speed | raise `v` |
+| accel | `sqrt(a*d)` falls short of `v`, but not by much | raise `a` |
+| geometry | the leg is too short for any sane acceleration | change the choreography |
+
+**Blends chain legs.** A radius above zero means the arm does not stop at that
+waypoint, so consecutive legs driving the same joint the same way behave as
+one long leg and the joint keeps accelerating across all of them. This is why
+shrinking radii to satisfy the overlap rule made Sprint *tamer* (peak TCP
+0.67 to 0.55 m/s), and why `blend.repair()` only ever reduces where it must.
+
+Numbers here are estimates from triangular velocity profiles. What a demo
+actually did is a question for `telemetry.py`, and every figure should be
+confirmed against a recording before it is believed.
+
+## When a demo will not fit
+
+Demos apply fixed joint offsets to the saved home, so whether a choreography
+is safe depends on a pose it does not control. With the home elbow folded to
++145.5 deg, offsets adding +21 deg reach the ~166 deg fold where the forearm
+meets the base -- and six of the eleven demos were being **refused outright**
+by the guard in `websocket_controller`, so pressing them sent nothing at all.
+
+`src/control/amplitude.py` now shrinks such a program about home to the
+largest size that clears the guard, refusing only below 25%. The same
+choreography performed smaller beats a button that does nothing. It is
+computed at send time rather than tabulated, so straightening the elbow at
+Home restores full amplitude on its own.
+
+```bash
+venv/bin/python motion_lab/find_home.py    # smallest home change that fixes everything
+```
+
+Amplitude costs reach, but surprisingly little speed: because peak speed goes
+as the square root of distance, halving a leg costs only about 30% of its
+peak. Measured across the catalogue, straightening the home elbow 24 deg
+would restore every demo to full size while lifting mean speed only from 49%
+to 52% of the per-joint ceiling.
 
 ## Experiments
 

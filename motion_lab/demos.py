@@ -26,6 +26,7 @@ import yaml  # noqa: E402
 
 import blend  # noqa: E402
 import choreography  # noqa: E402
+from control import amplitude  # noqa: E402
 from envelope import Envelope  # noqa: E402
 from obstacles import ObstacleSet  # noqa: E402
 
@@ -115,24 +116,41 @@ def main():
     env = Envelope.load_if_present(os.path.join(HERE, "workspace_envelope.json"))
     obs = ObstacleSet.from_json(env.obstacles) if env else ObstacleSet()
 
+    cfg = yaml.safe_load(open(os.path.join(ROOT, "config", "robot_config.yaml")))
+    home = cfg["demo"]["saved_home_joints"]
+
     programs = capture_all()
     reports = []
+    scales = {}
     for name, rows in programs.items():
-        rep = choreography.analyse(name, rows, closed=True, obstacles=obs)
+        # Report what the robot is actually SENT. The controller shrinks a
+        # program that would self-collide, so analysing the authored version
+        # would flag collisions that never reach the arm and would overstate
+        # the speed, since a smaller demo has shorter legs to accelerate over.
+        sent, scale = amplitude.fit(rows, home, closed=True)
+        if sent is None:
+            print(f"\n=== {name} ===\n  REFUSED: unsafe even at minimum amplitude")
+            continue
+        scales[name] = scale
+        rep = choreography.analyse(name, sent, closed=True, obstacles=obs)
         reports.append(rep)
         print()
         print(choreography.describe(rep))
+        if scale < 1.0:
+            print(f"  amplitude      shrunk to {scale*100:.0f}% by the guard "
+                  f"(straighten the elbow at Home to recover it)")
         if show_blends:
-            bad = blend.problems(rows, closed=True)
-            print(f"  blends         {len(bad)} of {len(rows)} legs overlap"
+            bad = blend.problems(sent, closed=True)
+            print(f"  blends         {len(bad)} of {len(sent)} legs overlap"
                   if bad else "  blends         all legal")
 
-    print("\n\n=== how fast each demo can actually go ===")
-    print(f"{'demo':<17}{'lead':<13}{'cmd':>6}{'able':>7}{'% ceil':>8}  limited by")
+    print("\n\n=== how fast each demo can actually go, as sent ===")
+    print(f"{'demo':<17}{'lead':<13}{'amp':>5}{'cmd':>6}{'able':>7}{'% ceil':>8}"
+          f"  limited by")
     for rep in sorted(reports, key=lambda r: r.fraction):
         print(f"{rep.name:<17}{choreography.JOINT_NAME[rep.lead_joint]:<13}"
-              f"{rep.v_cmd:>6.2f}{rep.v_possible:>7.2f}"
-              f"{rep.fraction * 100:>7.0f}%  {rep.limited_by}")
+              f"{scales.get(rep.name, 1.0)*100:>4.0f}%{rep.v_cmd:>6.2f}"
+              f"{rep.v_possible:>7.2f}{rep.fraction * 100:>7.0f}%  {rep.limited_by}")
 
     hurt = [r for r in reports if r.limited_by == "geometry"]
     slow = [r for r in reports if r.limited_by == "accel"]
@@ -146,11 +164,18 @@ def main():
     risky = [r for r in reports if r.self_collision]
     if risky:
         print(f"\nSELF-COLLISION in: {', '.join(r.name for r in risky)}")
-    close = [r for r in reports
-             if r.clearance_m is not None and r.clearance_m < 0.05]
+    touching = [r for r in reports
+                if r.clearance_m is not None and r.clearance_m < 0]
+    if touching:
+        print("TOUCHES a measured solid: " +
+              ", ".join(f"{r.name} ({-r.clearance_m * 1000:.0f} mm in)"
+                        for r in touching))
+    close = [r for r in reports if r.clearance_m is not None
+             and 0 <= r.clearance_m < r.clearance_margin]
     if close:
-        print("close to a measured solid: " +
-              ", ".join(f"{r.name} ({r.clearance_m * 1000:.0f} mm)" for r in close))
+        print("passes close to a solid, inside its margin but not touching: " +
+              ", ".join(f"{r.name} ({r.clearance_m * 1000:.0f} mm of air)"
+                        for r in close))
 
 
 if __name__ == "__main__":
